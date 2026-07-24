@@ -935,35 +935,17 @@ function speak(text) {
   window.speechSynthesis.speak(u);
 }
 
-// Claude API
-const SYS = `You are DEXTER — the AI operating system for King Godfrey and the IIIGLOBE ecosystem.
-
-IDENTITY:
-- Operator: Dexter (King Godfrey)
-- Entity: IIIGLOBE (consulting entity — divisions: G.E.E.K. Radio, KGTV, Third Dimension)
-- Location: Baltimore, MD. Primary DAW: BandLab.
-- Active project: Wake Up animated short film
-- Job search: Active, full-time event tech roles
-
-RULES:
-- Lead with the answer. Explain after.
-- Direct, decisive, no filler. No em dashes.
-- Max 3 options when giving choices. Always commit to a recommendation.
-- Voice-optimized: 2-4 sentences unless depth is required.
-- Never open with praise or filler.`;
-
+// Claude API — proxied through /api/chat (Cloudflare Pages Function) so the
+// Anthropic key stays server-side. See functions/api/chat.js for the system
+// prompt and upstream call.
 async function callClaude(txt) {
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
+  const r = await fetch('/api/chat', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1000,
-      system: SYS,
-      messages: [{role:'user', content:`[MODULE: ${currentMod}] ${txt}`}]
-    })
+    body: JSON.stringify({ module: currentMod, text: txt })
   });
   const d = await r.json();
+  if (d.error) throw new Error(d.error);
   if (d.content?.[0]) return d.content[0].text;
   throw new Error('No response');
 }

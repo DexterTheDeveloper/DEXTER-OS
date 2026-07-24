@@ -13,7 +13,30 @@ Claude-powered brain · Voice I/O · PWA (installs to iPhone home screen)
 4. Save and Deploy — first build takes ~1 min, gives a `*.pages.dev` URL
 5. To attach a custom domain: project → Custom domains → Add a domain, then follow the DNS instructions shown
 
-No env vars or build step needed — this is a static site (`index.html`, `manifest.json`, `sw.js`, `avatar.png`), so Pages serves it as-is. `wrangler.toml` in this repo mirrors these settings for CLI deploys (`wrangler pages deploy .`) if you ever want those instead of the Git integration.
+The frontend is fully static (`index.html`, `manifest.json`, `sw.js`, `avatar.png`); `functions/api/chat.js` is a Pages Function that ships automatically alongside it — no separate Worker to deploy. `wrangler.toml` mirrors these settings for CLI deploys (`wrangler pages deploy .`) if you ever want those instead of the Git integration.
+
+### Required: set the Anthropic API key (server-side only)
+
+The frontend calls `/api/chat`, never `api.anthropic.com` directly — the key must never live in `index.html` or any other file the browser downloads.
+
+1. Project → **Settings** → **Environment variables** → **Add variable**
+2. Name `ANTHROPIC_API_KEY`, paste your real key, check **Encrypt**, save for both Production and Preview
+3. Redeploy (Settings changes need a new deployment to take effect — trigger one from **Deployments** → **Retry deployment**, or just push a commit)
+
+Local testing: copy `.dev.vars.example` to `.dev.vars` (gitignored, never commit it) and fill in your key, then run `npx wrangler pages dev .`.
+
+### Required: gate it behind Cloudflare Access (personal use only)
+
+This is a single-operator tool with no login screen of its own — anyone with the URL gets the full interface and, without a gate, could ride your Anthropic quota. Cloudflare Access puts a login wall in front of the Pages domain for free, no code changes:
+
+1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Zero Trust** (first visit prompts a one-time free-plan setup, up to 50 seats)
+2. **Access** → **Applications** → **Add an application** → **Self-hosted**
+3. Application domain: your `*.pages.dev` domain (or custom domain, once attached)
+4. Identity provider: default **One-time PIN** (email code) needs no extra setup — good enough for a single operator
+5. Policy: Include → **Emails** → your own email address only
+6. Save
+
+Every visit will now require an email login code before the DEXTER interface loads, on top of the API key never being exposed client-side.
 
 ## Deploy to GitHub Pages (previous, 5 commands)
 
