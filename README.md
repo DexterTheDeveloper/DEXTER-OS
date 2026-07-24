@@ -5,7 +5,17 @@ Claude-powered brain · Voice I/O · PWA (installs to iPhone home screen)
 
 ---
 
-## Deploy to GitHub Pages (5 commands)
+## Deploy to Cloudflare Pages (current)
+
+1. [dash.cloudflare.com](https://dash.cloudflare.com) → Workers & Pages → Create → Pages → Connect to Git
+2. Authorize GitHub, select the `dexter-os` repo, grant access
+3. Project settings: Production branch `main` · Framework preset `None` · Build command *(blank)* · Build output directory `/`
+4. Save and Deploy — first build takes ~1 min, gives a `*.pages.dev` URL
+5. To attach a custom domain: project → Custom domains → Add a domain, then follow the DNS instructions shown
+
+No env vars or build step needed — this is a static site (`index.html`, `manifest.json`, `sw.js`, `avatar.png`), so Pages serves it as-is. `wrangler.toml` in this repo mirrors these settings for CLI deploys (`wrangler pages deploy .`) if you ever want those instead of the Git integration.
+
+## Deploy to GitHub Pages (previous, 5 commands)
 
 ```bash
 # 1. Create a new repo on github.com named: dexter-os
