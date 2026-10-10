@@ -25,18 +25,17 @@ The frontend calls `/api/chat`, never `api.anthropic.com` directly — the key m
 
 Local testing: copy `.dev.vars.example` to `.dev.vars` (gitignored, never commit it) and fill in your key, then run `npx wrangler pages dev .`.
 
-### Required: gate it behind Cloudflare Access (personal use only)
+### Required: set a passphrase (personal use only)
 
-This is a single-operator tool with no login screen of its own — anyone with the URL gets the full interface and, without a gate, could ride your Anthropic quota. Cloudflare Access puts a login wall in front of the Pages domain for free, no code changes:
+This is a single-operator tool. Without a gate, anyone with the URL could spend your Anthropic credits through `/api/chat`, so the function refuses every request until you set a passphrase:
 
-1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Zero Trust** (first visit prompts a one-time free-plan setup, up to 50 seats)
-2. **Access** → **Applications** → **Add an application** → **Self-hosted**
-3. Application domain: your `*.pages.dev` domain (or custom domain, once attached)
-4. Identity provider: default **One-time PIN** (email code) needs no extra setup — good enough for a single operator
-5. Policy: Include → **Emails** → your own email address only
-6. Save
+1. Project → **Settings** → **Variables and Secrets** → **Add**
+2. Type **Secret**, name `DEXTER_PASSPHRASE`, value: a phrase you make up, 12+ characters (four random words works)
+3. Redeploy (or push a commit)
 
-Every visit will now require an email login code before the DEXTER interface loads, on top of the API key never being exposed client-side.
+The first time you chat, DEXTER asks for the passphrase and remembers it on that device. Use the same passphrase for the DEXTER MCP server (`mcp/README.md`).
+
+Optional, stronger: put Cloudflare Access in front of the whole site (Zero Trust → Access → Applications → Self-hosted, domain = your `*.pages.dev` address, policy = your email). The passphrase still applies on top.
 
 ## Deploy to GitHub Pages (previous, 5 commands)
 

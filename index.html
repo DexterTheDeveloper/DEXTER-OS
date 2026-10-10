@@ -938,12 +938,30 @@ function speak(text) {
 // Claude API — proxied through /api/chat (Cloudflare Pages Function) so the
 // Anthropic key stays server-side. See functions/api/chat.js for the system
 // prompt and upstream call.
-async function callClaude(txt) {
+// The Pages Function also requires DEXTER's passphrase. It's asked for once and kept on this device.
+function storedPass() {
+  try { return localStorage.getItem('dexterPass') || ''; } catch (e) { return ''; }
+}
+
+async function callClaude(txt, retried) {
   const r = await fetch('/api/chat', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Dexter-Passphrase': encodeURIComponent(storedPass())
+    },
     body: JSON.stringify({ module: currentMod, text: txt })
   });
+  if (r.status === 401) {
+    try { localStorage.removeItem('dexterPass'); } catch (e) {}
+    if (!retried) {
+      const entered = window.prompt('DEXTER passphrase');
+      if (entered) {
+        try { localStorage.setItem('dexterPass', entered); } catch (e) {}
+        return callClaude(txt, true);
+      }
+    }
+  }
   const d = await r.json();
   if (d.error) throw new Error(d.error);
   if (d.content?.[0]) return d.content[0].text;
@@ -965,7 +983,7 @@ async function send() {
     speak(reply);
   } catch(e) {
     removeTyping();
-    addMsg('dexter', 'API error. Check console.');
+    addMsg('dexter', 'API error: ' + (e && e.message ? e.message : 'check console.'));
     setAvatarState('standby');
     console.error(e);
   }

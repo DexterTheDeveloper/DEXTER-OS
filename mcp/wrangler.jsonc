@@ -1,0 +1,21 @@
+/**
+ * DEXTER MCP server (DEX-001).
+ * Deploys as its own Worker from the `mcp/` folder of dexter-os.
+ * D1 and KV bindings carry no IDs on purpose: Wrangler provisions them on the
+ * first deploy. Secrets are set in the Cloudflare dashboard, never here.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dexter-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "keep_vars": true,
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["* * * * *"] },
+  "d1_databases": [{ "binding": "DB", "database_name": "dexter" }],
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  "vars": { "DEXTER_TZ": "America/New_York" },
+  "dev": { "port": 8788 }
+}
