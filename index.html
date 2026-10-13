@@ -1034,7 +1034,7 @@ if ('serviceWorker' in navigator) {
 }
 
 // Init
-window.speechSynthesis.onvoiceschanged = () => {};
+if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = () => {};
 setTimeout(() => {
   const msg = 'DEXTER online. King Godfrey mask active. All systems ready. What are we running today?';
   addMsg('dexter', msg);
