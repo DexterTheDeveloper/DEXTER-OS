@@ -192,6 +192,12 @@
     transition: filter 0.3s;
   }
 
+  /* Face loops: the <video> shows only once body.face-mode-video is set by faceInit(); until then (and in
+     the webp / static fallbacks) the <img> shows, so there is never an empty box. */
+  .face-video { display: none; }
+  body.face-mode-video .face-video { display: block; }
+  body.face-mode-video .face-img { display: none; }
+
   .eye-glow-l, .eye-glow-r {
     position: absolute; width: 26px; height: 13px;
     border-radius: 50%; top: 44%;
@@ -319,7 +325,7 @@
     overflow: hidden; background: #000; position: relative;
   }
 
-  .mini-avatar-img-wrap img {
+  .mini-avatar-img-wrap img, .mini-avatar-img-wrap video {
     width: 100%; height: 100%; object-fit: cover;
     filter: brightness(0.9) saturate(1.2);
   }
@@ -664,7 +670,8 @@
           <div style="position:relative">
             <div class="avatar-border" id="avatarBorder"></div>
             <div class="avatar-img-wrap" id="avatarImgWrap">
-              <img class="avatar-img" src="avatar.png" alt="DEXTER" onerror="this.style.display='none'"/>
+              <video class="avatar-img face-video" id="avatarVideo" muted loop playsinline preload="auto" poster="avatar.png" aria-label="DEXTER"></video>
+              <img class="avatar-img face-img" id="avatarImg" src="avatar.png" alt="DEXTER" onerror="faceImgError(this)"/>
               <div class="eye-glow-l"></div>
               <div class="eye-glow-r"></div>
               <div class="avatar-scan"></div>
@@ -732,7 +739,8 @@
         <div class="mini-avatar-wrap">
           <div class="mini-avatar-border"></div>
           <div class="mini-avatar-img-wrap" id="miniAvatarWrap">
-            <img src="avatar.png" alt="DEXTER" onerror="this.style.display='none'"/>
+            <video class="face-video" id="miniAvatarVideo" muted loop playsinline preload="auto" poster="avatar.png" aria-label="DEXTER"></video>
+            <img class="face-img" id="miniAvatarImg" src="avatar.png" alt="DEXTER" onerror="faceImgError(this)"/>
             <div class="mini-eye-l"></div>
             <div class="mini-eye-r"></div>
           </div>
@@ -831,8 +839,70 @@ function _setMod(name) {
   addSys(`// MODULE: ${name}`);
 }
 
+// Face loops — one short loop per state, swapped by setAvatarState. Three modes:
+//   video  : <video> playing avatar-<state>.webm (muted, looping, inline)
+//   webp   : <img> showing avatar-<state>.webp, used when the WebView refuses muted autoplay
+//            (video.play() rejects with anything but AbortError), cannot decode VP9, or errors
+//   static : <img> showing avatar.png, used for prefers-reduced-motion or if a .webp fails to load
+// The <img> is what renders until faceInit() picks a mode, so there is never a blank box.
+const FACE = { mode: 'static', state: 'idle', ready: false };
+const FACE_STATE = { speaking: 'speaking', listening: 'listening', thinking: 'thinking' };
+function faceEls(tag) {
+  return [document.getElementById(tag === 'video' ? 'avatarVideo' : 'avatarImg'),
+          document.getElementById(tag === 'video' ? 'miniAvatarVideo' : 'miniAvatarImg')].filter(Boolean);
+}
+function faceReduced() {
+  try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { return false; }
+}
+function setFaceMode(mode) {
+  FACE.mode = mode;
+  document.body.classList.remove('face-mode-video', 'face-mode-webp', 'face-mode-static');
+  document.body.classList.add('face-mode-' + mode);
+  if (mode !== 'video') faceEls('video').forEach(v => { try { v.pause(); } catch (e) {} v.removeAttribute('src'); try { v.load(); } catch (e) {} });
+  faceApply();
+}
+function faceApply() {
+  if (!FACE.ready) return;
+  const name = FACE.state;
+  if (FACE.mode === 'video') {
+    faceEls('video').forEach(v => {
+      const src = 'avatar-' + name + '.webm';
+      if (v.getAttribute('src') !== src) v.setAttribute('src', src);
+      let p;
+      try { p = v.play(); } catch (e) { p = Promise.reject(e); }
+      if (p && p.catch) p.catch(err => {
+        if (err && err.name === 'AbortError') return;          // src swapped mid-play: not a policy refusal
+        if (FACE.mode === 'video') setFaceMode('webp');        // autoplay refused / not supported: animated WebP
+      });
+    });
+  } else {
+    const src = FACE.mode === 'webp' ? 'avatar-' + name + '.webp' : 'avatar.png';
+    faceEls('img').forEach(img => { if (img.getAttribute('src') !== src) img.setAttribute('src', src); });
+  }
+}
+function faceImgError(img) {
+  if ((img.getAttribute('src') || '') === 'avatar.png') { img.style.display = 'none'; return; }
+  if (FACE.mode !== 'static') setFaceMode('static');
+}
+function faceInit() {
+  FACE.ready = true;
+  if (faceReduced()) { setFaceMode('static'); return; }
+  const probe = document.createElement('video');
+  const vp9 = probe.canPlayType && probe.canPlayType('video/webm; codecs="vp9"');
+  if (!vp9) { setFaceMode('webp'); return; }
+  faceEls('video').forEach(v => v.addEventListener('error', () => { if (FACE.mode === 'video') setFaceMode('webp'); }));
+  setFaceMode('video');
+  try {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = () => setFaceMode(mq.matches ? 'static' : 'video');
+    if (mq.addEventListener) mq.addEventListener('change', onChange); else if (mq.addListener) mq.addListener(onChange);
+  } catch (e) {}
+}
+
 // Avatar state — updates both desktop sidebar and mobile strip
 function setAvatarState(state) {
+  FACE.state = FACE_STATE[state] || 'idle';
+  faceApply();
   const wrap = document.getElementById('avatarImgWrap');
   const mini = document.getElementById('miniAvatarWrap');
   const st = document.getElementById('avatarState');
@@ -1317,6 +1387,7 @@ if ('serviceWorker' in navigator) {
 }
 
 // Init
+faceInit();
 if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = () => {};
 try { if (!window.speechSynthesis) armServerVoice(); } catch (e) {}   // no Web Speech: show the voice toggle, ready to unlock audio on the first tap
 setTimeout(() => {
