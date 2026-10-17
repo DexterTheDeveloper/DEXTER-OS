@@ -872,13 +872,31 @@ function faceApply() {
       try { p = v.play(); } catch (e) { p = Promise.reject(e); }
       if (p && p.catch) p.catch(err => {
         if (err && err.name === 'AbortError') return;          // src swapped mid-play: not a policy refusal
-        if (FACE.mode === 'video') setFaceMode('webp');        // autoplay refused / not supported: animated WebP
+        if (FACE.mode !== 'video') return;
+        setFaceMode('webp');                                   // autoplay refused / not supported: animated WebP
+        if (err && err.name === 'NotAllowedError' && !FACE.retryArmed) {
+          // refused before any touch: after the first real gesture, try video once more
+          FACE.retryArmed = true;
+          ['click', 'keydown'].forEach(ev => document.addEventListener(ev, faceRetryVideo, { capture: true, once: true }));
+        }
       });
     });
   } else {
     const src = FACE.mode === 'webp' ? 'avatar-' + name + '.webp' : 'avatar.png';
     faceEls('img').forEach(img => { if (img.getAttribute('src') !== src) img.setAttribute('src', src); });
   }
+}
+function faceRetryVideo() {
+  // One retry after the first gesture. Both listeners are once-only; whichever fires first runs this.
+  if (FACE.retried || FACE.mode !== 'webp') return;
+  FACE.retried = true;
+  const v = faceEls('video')[0];
+  if (!v) return;
+  v.setAttribute('src', 'avatar-' + FACE.state + '.webm');
+  let p;
+  try { p = v.play(); } catch (e) { return; }
+  if (p && p.then) p.then(() => { if (FACE.mode === 'webp') setFaceMode('video'); },
+                          () => { try { v.removeAttribute('src'); v.load(); } catch (e) {} });   // still refused: stay on WebP
 }
 function faceImgError(img) {
   if ((img.getAttribute('src') || '') === 'avatar.png') { img.style.display = 'none'; return; }
