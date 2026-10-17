@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#050508">
+<link rel="apple-touch-icon" href="avatar.png">
+<title>DEXTER — Calendar</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<style>
+  /* Wall calendar for DEXTER-OS. Served at /calendar (Pages clean URLs). Data: GET /api/calendar.
+     Plain ES2018 and no keyboard: it runs in the DF-18T's Android 14 WebView, landscape, read from
+     across a room, and on the phone in portrait. Colors and fonts follow index.html. */
+  :root {
+    --bg: #050508;
+    --panel: #0d0d14;
+    --border: #151525;
+    --accent: #00d4ff;
+    --accent2: #39ff14;
+    --accent3: #ff4400;
+    --gold: #ffaa00;
+    --text: #c8d6e5;
+    --dim: #3a4558;
+    --bright: #edf2f7;
+    --mono: 'Share Tech Mono', monospace;
+    --display: 'Orbitron', sans-serif;
+    --body: 'Rajdhani', sans-serif;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --unit: 1vw;   /* landscape sizes scale with the width */
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    height: 100%; height: -webkit-fill-available;
+    overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: var(--body);
+    -webkit-user-select: none; user-select: none;
+  }
+  body::before {
+    content: ''; position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+    background-image:
+      linear-gradient(rgba(0,212,255,0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,212,255,0.025) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none; z-index: 0;
+  }
+
+  /* ── LAYOUT: landscape = clock column left, agenda right, 7-day strip under the agenda ── */
+  .wall {
+    position: relative; z-index: 1;
+    display: grid;
+    grid-template-columns: 34% 1fr;
+    grid-template-rows: 1fr auto;
+    height: 100%; height: -webkit-fill-available;
+    padding-top: var(--safe-top); padding-bottom: var(--safe-bottom);
+  }
+
+  .now {
+    grid-row: 1 / 3;
+    display: flex; flex-direction: column;
+    padding: calc(var(--unit) * 2.2) calc(var(--unit) * 2);
+    border-right: 1px solid var(--border);
+    background: rgba(5,5,8,0.7);
+    min-width: 0;
+  }
+  .logo {
+    font-family: var(--display); font-weight: 900;
+    font-size: calc(var(--unit) * 1.0); letter-spacing: 0.5em;
+    color: var(--accent); text-shadow: 0 0 14px rgba(0,212,255,0.5);
+  }
+  .clock {
+    margin-top: calc(var(--unit) * 1.6);
+    font-family: var(--display); font-weight: 700;
+    font-size: calc(var(--unit) * 9.5); line-height: 1;
+    letter-spacing: -0.02em; color: var(--bright);
+    text-shadow: 0 0 30px rgba(0,212,255,0.25);
+    white-space: nowrap;
+  }
+  .clock .ampm {
+    font-family: var(--mono); font-size: calc(var(--unit) * 2.2);
+    letter-spacing: 0.1em; color: var(--accent); margin-left: 0.25em; vertical-align: top;
+  }
+  .weekday {
+    margin-top: calc(var(--unit) * 1.4);
+    font-size: calc(var(--unit) * 3.2); font-weight: 700; line-height: 1.1; color: var(--bright);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .date {
+    margin-top: calc(var(--unit) * 0.4);
+    font-size: calc(var(--unit) * 2.4); font-weight: 400; color: var(--text);
+  }
+  .status {
+    margin-top: auto; padding-top: calc(var(--unit) * 1);
+    font-family: var(--mono); font-size: calc(var(--unit) * 1.0);
+    letter-spacing: 0.12em; color: var(--dim);
+  }
+  .status.warn { color: var(--gold); }
+  .status.bad { color: var(--accent3); }
+  .buttons { display: flex; gap: calc(var(--unit) * 0.8); margin-top: calc(var(--unit) * 1.2); }
+  .btn {
+    display: inline-block;
+    font-family: var(--display); font-weight: 700;
+    font-size: calc(var(--unit) * 1.15); letter-spacing: 0.25em;
+    color: var(--accent); background: rgba(0,212,255,0.06);
+    border: 1px solid rgba(0,212,255,0.35); border-radius: 2px;
+    padding: calc(var(--unit) * 1.0) calc(var(--unit) * 1.6);
+    cursor: pointer; text-align: center;
+  }
+  .btn:active { background: rgba(0,212,255,0.2); }
+  .btn.primary { color: #050508; background: var(--accent); border-color: var(--accent); box-shadow: 0 0 24px rgba(0,212,255,0.35); }
+
+  /* ── AGENDA ── */
+  .agenda {
+    grid-column: 2; grid-row: 1;
+    display: flex; flex-direction: column; min-height: 0; min-width: 0;
+    padding: calc(var(--unit) * 2) calc(var(--unit) * 2.4) 0;
+  }
+  .agenda-head {
+    display: flex; align-items: baseline; gap: calc(var(--unit) * 1.2);
+    padding-bottom: calc(var(--unit) * 0.8);
+    border-bottom: 1px solid var(--border);
+    position: relative; flex-shrink: 0;
+  }
+  .agenda-head::after {
+    content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2), transparent); opacity: 0.45;
+  }
+  .agenda-label {
+    font-family: var(--display); font-weight: 900;
+    font-size: calc(var(--unit) * 2.0); letter-spacing: 0.3em; color: var(--accent);
+    text-shadow: 0 0 14px rgba(0,212,255,0.4);
+  }
+  .agenda-date { font-size: calc(var(--unit) * 1.6); color: var(--text); font-weight: 600; letter-spacing: 0.05em; }
+  .agenda-back {
+    margin-left: auto;
+    font-family: var(--mono); font-size: calc(var(--unit) * 1.0); letter-spacing: 0.15em;
+    color: var(--gold); cursor: pointer; display: none;
+  }
+  .agenda.away .agenda-back { display: inline; }
+  .agenda-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: calc(var(--unit) * 1.0) 0 calc(var(--unit) * 1); }
+  .agenda-list::-webkit-scrollbar, .strip::-webkit-scrollbar { display: none; }
+  .empty {
+    font-size: calc(var(--unit) * 2.6); color: var(--dim); font-weight: 600;
+    padding: calc(var(--unit) * 3) 0; letter-spacing: 0.05em;
+  }
+  .ev {
+    display: flex; align-items: flex-start; gap: calc(var(--unit) * 1.4);
+    padding: calc(var(--unit) * 0.7) calc(var(--unit) * 1.2);
+    margin-bottom: calc(var(--unit) * 0.45);
+    border-left: calc(var(--unit) * 0.35) solid var(--accent);
+    background: rgba(13,13,20,0.9);
+    border-top: 1px solid var(--border); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  }
+  .ev-time {
+    flex: 0 0 calc(var(--unit) * 15);
+    font-family: var(--mono); font-size: calc(var(--unit) * 1.9); line-height: 1.25;
+    color: var(--bright); letter-spacing: 0.02em; white-space: nowrap;
+  }
+  .ev.allday .ev-time { color: var(--accent2); letter-spacing: 0.15em; }
+  .ev-main { min-width: 0; flex: 1; }
+  .ev-title { font-size: calc(var(--unit) * 2.4); font-weight: 700; line-height: 1.15; color: var(--bright); overflow-wrap: anywhere; }
+  .ev-loc { font-size: calc(var(--unit) * 1.4); color: var(--text); opacity: 0.8; margin-top: 0.15em; overflow-wrap: anywhere; }
+  .ev-cal { font-family: var(--mono); font-size: calc(var(--unit) * 0.9); letter-spacing: 0.15em; color: var(--dim); margin-top: 0.3em; }
+  .ev.declined { opacity: 0.45; }
+  .ev.declined .ev-title { text-decoration: line-through; }
+  .ev.tentative .ev-title::after { content: ' ?'; color: var(--gold); }
+
+  /* ── 7-DAY STRIP ── */
+  .strip {
+    grid-column: 2; grid-row: 2;
+    display: grid; grid-template-columns: repeat(7, 1fr);
+    height: 31vh; min-height: 0;
+    border-top: 1px solid var(--border);
+    background: rgba(5,5,8,0.6);
+  }
+  .day {
+    display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+    padding: calc(var(--unit) * 0.8) calc(var(--unit) * 0.7);
+    border-right: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .day:last-child { border-right: 0; }
+  .day-head { display: flex; align-items: baseline; gap: 0.4em; flex-shrink: 0; }
+  .day-name { font-family: var(--mono); font-size: calc(var(--unit) * 1.05); letter-spacing: 0.2em; color: var(--dim); }
+  .day-num { font-family: var(--display); font-weight: 700; font-size: calc(var(--unit) * 1.9); color: var(--text); }
+  .day.today .day-name, .day.today .day-num { color: var(--accent); }
+  .day.today { background: rgba(0,212,255,0.05); }
+  .day.sel { background: rgba(255,170,0,0.08); box-shadow: inset 0 calc(var(--unit) * 0.25) 0 var(--gold); }
+  .day.sel .day-num { color: var(--gold); }
+  .day-evs { margin-top: calc(var(--unit) * 0.5); overflow: hidden; }
+  .day-ev {
+    font-size: calc(var(--unit) * 1.15); line-height: 1.3; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    padding-left: 0.45em; border-left: 2px solid var(--accent); margin-bottom: 0.25em;
+  }
+  .day-ev .t { font-family: var(--mono); font-size: 0.85em; color: var(--dim); margin-right: 0.35em; }
+  .day-ev.declined { opacity: 0.45; text-decoration: line-through; }
+  .day-more { font-family: var(--mono); font-size: calc(var(--unit) * 0.9); color: var(--dim); letter-spacing: 0.1em; }
+  .day-none { font-size: calc(var(--unit) * 1.0); color: var(--dim); }
+
+  /* ── MONTH OVERLAY ── */
+  .month {
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 20;
+    background: var(--bg);
+    display: none; flex-direction: column;
+    padding: calc(var(--unit) * 2) calc(var(--unit) * 3);
+  }
+  .month.open { display: flex; }
+  .month-head { display: flex; align-items: center; gap: calc(var(--unit) * 1.5); flex-shrink: 0; }
+  .month-title { font-family: var(--display); font-weight: 900; font-size: calc(var(--unit) * 2.4); letter-spacing: 0.2em; color: var(--accent); flex: 1; }
+  .month-nav { font-size: calc(var(--unit) * 1.8); padding: calc(var(--unit) * 0.5) calc(var(--unit) * 1.4); letter-spacing: 0; }
+  .month-grid {
+    flex: 1; min-height: 0;
+    display: grid; grid-template-columns: repeat(7, 1fr); grid-template-rows: auto; grid-auto-rows: 1fr;
+    gap: 2px; margin-top: calc(var(--unit) * 1.2);
+  }
+  .month-wd { font-family: var(--mono); font-size: calc(var(--unit) * 1.0); letter-spacing: 0.2em; color: var(--dim); text-align: center; align-self: end; padding-bottom: 0.4em; }
+  .month-grid .month-wd { grid-row: 1; }
+  .mday {
+    position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(13,13,20,0.9); border: 1px solid var(--border); cursor: pointer; min-height: 0;
+  }
+  .mday.blank { background: transparent; border-color: transparent; cursor: default; }
+  .mday .n { font-family: var(--display); font-weight: 700; font-size: calc(var(--unit) * 1.9); color: var(--text); }
+  .mday.today .n { color: var(--accent); }
+  .mday.today { border-color: rgba(0,212,255,0.5); }
+  .mday.sel { box-shadow: inset 0 0 0 2px var(--gold); }
+  .mday.out .n { color: var(--dim); }
+  .dots { display: flex; gap: 0.3em; margin-top: 0.3em; height: calc(var(--unit) * 0.7); }
+  .dot { width: calc(var(--unit) * 0.7); height: calc(var(--unit) * 0.7); border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+
+  /* ── DEXTER DRAWER ── */
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 30;
+    width: 46%; max-width: 980px;
+    background: var(--bg); border-left: 1px solid var(--border);
+    box-shadow: -20px 0 60px rgba(0,0,0,0.7);
+    transform: translateX(104%); transition: transform .3s ease;
+    display: flex; flex-direction: column;
+  }
+  .drawer.open { transform: translateX(0); }
+  .drawer-head {
+    display: flex; align-items: center; justify-content: space-between;
+    height: calc(var(--unit) * 3.4); padding: 0 calc(var(--unit) * 1.2);
+    border-bottom: 1px solid var(--border); flex-shrink: 0; background: rgba(5,5,8,0.95);
+  }
+  .drawer-head .logo { font-size: calc(var(--unit) * 0.9); }
+  .drawer-close { font-size: calc(var(--unit) * 0.95); padding: calc(var(--unit) * 0.5) calc(var(--unit) * 1.1); }
+  .drawer iframe { flex: 1; width: 100%; border: 0; background: var(--bg); }
+  .scrim { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 29; background: rgba(0,0,0,0.5); display: none; }
+  .scrim.open { display: block; }
+
+  /* ── PORTRAIT / PHONE: one column, strip scrolls sideways ── */
+  @media (max-width: 760px), (orientation: portrait) {
+    :root { --unit: 2.1vw; }
+    .wall { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+    .now {
+      grid-row: 1; grid-column: 1;
+      flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 0 calc(var(--unit) * 1.5);
+      padding: calc(var(--unit) * 2) calc(var(--unit) * 2) calc(var(--unit) * 1);
+      border-right: 0; border-bottom: 1px solid var(--border);
+    }
+    .logo { width: 100%; font-size: calc(var(--unit) * 1.4); }
+    .clock { margin-top: calc(var(--unit) * 0.6); font-size: calc(var(--unit) * 7.5); }
+    .clock .ampm { font-size: calc(var(--unit) * 2.4); }
+    .weekday { margin-top: 0; font-size: calc(var(--unit) * 3.2); }
+    .date { margin-top: 0; font-size: calc(var(--unit) * 2.6); width: 100%; }
+    .status { width: 100%; margin-top: calc(var(--unit) * 0.6); padding-top: 0; font-size: calc(var(--unit) * 1.5); }
+    .buttons { display: none; }
+    .agenda { grid-column: 1; grid-row: 2; padding: calc(var(--unit) * 1.8) calc(var(--unit) * 2) 0; }
+    .agenda-label { font-size: calc(var(--unit) * 2.6); }
+    .agenda-date { font-size: calc(var(--unit) * 2.4); }
+    .agenda-back { font-size: calc(var(--unit) * 1.6); }
+    .ev { flex-direction: column; gap: calc(var(--unit) * 0.4); padding: calc(var(--unit) * 1.4) calc(var(--unit) * 1.6); border-left-width: 4px; }
+    .ev-time { flex-basis: auto; font-size: calc(var(--unit) * 2.2); }
+    .ev-title { font-size: calc(var(--unit) * 3.0); }
+    .ev-loc { font-size: calc(var(--unit) * 2.2); }
+    .ev-cal { font-size: calc(var(--unit) * 1.5); }
+    .empty { font-size: calc(var(--unit) * 3.2); }
+    .strip {
+      grid-column: 1; grid-row: 3;
+      display: flex; overflow-x: auto; -webkit-overflow-scrolling: touch;
+      height: 30vh; padding-bottom: calc(var(--unit) * 12 + var(--safe-bottom));
+    }
+    .day { flex: 0 0 42vw; padding: calc(var(--unit) * 1.4) calc(var(--unit) * 1.4); }
+    .day-name { font-size: calc(var(--unit) * 1.7); }
+    .day-num { font-size: calc(var(--unit) * 3.0); }
+    .day-ev { font-size: calc(var(--unit) * 2.0); }
+    .day-more, .day-none { font-size: calc(var(--unit) * 1.7); }
+    .mobile-bar {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+      display: flex; gap: calc(var(--unit) * 1.2);
+      padding: calc(var(--unit) * 1.5) calc(var(--unit) * 2) calc(var(--unit) * 1.5 + var(--safe-bottom));
+      background: rgba(5,5,8,0.95); border-top: 1px solid var(--border);
+    }
+    .mobile-bar .btn { flex: 1; font-size: calc(var(--unit) * 2.0); padding: calc(var(--unit) * 1.8) 0; }
+    .month { padding: calc(var(--unit) * 2.5) calc(var(--unit) * 2); }
+    .month-title { font-size: calc(var(--unit) * 1.9); letter-spacing: 0.08em; text-align: center; }
+    .month-nav { font-size: calc(var(--unit) * 3); }
+    .month-wd { font-size: calc(var(--unit) * 1.7); }
+    .mday .n { font-size: calc(var(--unit) * 3.0); }
+    .dots { height: calc(var(--unit) * 1.4); }
+    .dot { width: calc(var(--unit) * 1.4); height: calc(var(--unit) * 1.4); }
+    .drawer { width: 100%; max-width: none; }
+    .drawer-head { height: calc(var(--unit) * 7); padding: 0 calc(var(--unit) * 2); }
+    .drawer-head .logo { width: auto; font-size: calc(var(--unit) * 2.2); }
+    .drawer-close { font-size: calc(var(--unit) * 2.2); padding: calc(var(--unit) * 1.2) calc(var(--unit) * 2.2); }
+  }
+  @media (min-width: 761px) and (orientation: landscape) {
+    .mobile-bar { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wall" id="wall">
+  <aside class="now">
+    <div class="logo">DEXTER</div>
+    <div class="clock" id="clock">--:--</div>
+    <div class="weekday" id="weekday">&nbsp;</div>
+    <div class="date" id="date">&nbsp;</div>
+    <div class="status" id="status">loading…</div>
+    <div class="buttons">
+      <div class="btn" id="monthBtn">MONTH</div>
+      <div class="btn primary" id="dexterBtn">DEXTER</div>
+    </div>
+  </aside>
+
+  <section class="agenda" id="agenda">
+    <div class="agenda-head">
+      <span class="agenda-label" id="agendaLabel">TODAY</span>
+      <span class="agenda-date" id="agendaDate"></span>
+      <span class="agenda-back" id="agendaBack">BACK TO TODAY</span>
+    </div>
+    <div class="agenda-list" id="agendaList"></div>
+  </section>
+
+  <section class="strip" id="strip"></section>
+</div>
+
+<div class="mobile-bar">
+  <div class="btn" id="monthBtnM">MONTH</div>
+  <div class="btn primary" id="dexterBtnM">DEXTER</div>
+</div>
+
+<div class="month" id="month">
+  <div class="month-head">
+    <div class="btn month-nav" id="monthPrev">&lsaquo;</div>
+    <div class="month-title" id="monthTitle"></div>
+    <div class="btn month-nav" id="monthNext">&rsaquo;</div>
+    <div class="btn" id="monthClose">CLOSE</div>
+  </div>
+  <div class="month-grid" id="monthGrid"></div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <div class="logo">DEXTER</div>
+    <div class="btn drawer-close" id="drawerClose">CLOSE &times;</div>
+  </div>
+  <iframe id="dexterFrame" title="DEXTER" allow="microphone"></iframe>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var REFRESH_MS = 5 * 60 * 1000;
+  var DEFAULT_TZ = 'America/New_York';
+  var DAY = 86400000;
+  var WD = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  var WD_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+  var data = null;        // last good /api/calendar body
+  var lastGood = null;    // Date of the last good fetch
+  var tz = DEFAULT_TZ;
+  var todayKey = '';
+  var selectedKey = '';   // '' = today
+  var monthCursor = null; // {y, m} shown in the overlay
+  var byDay = {};         // key -> events on that day (built on render)
+
+  var $ = function (id) { return document.getElementById(id); };
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+
+  // ── time in the calendar's zone ──
+  var partFmt = {};
+  function partsIn(date, zone) {
+    var f = partFmt[zone];
+    if (!f) {
+      f = partFmt[zone] = new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    }
+    var out = {};
+    var parts = f.formatToParts(date);
+    for (var i = 0; i < parts.length; i++) out[parts[i].type] = parts[i].value;
+    return { y: +out.year, m: +out.month, d: +out.day, h: (+out.hour) % 24, mi: +out.minute };
+  }
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function keyOf(p) { return p.y + '-' + pad2(p.m) + '-' + pad2(p.d); }
+  function dayKey(date) { return keyOf(partsIn(date, tz)); }
+  function parseKey(key) { return { y: +key.slice(0, 4), m: +key.slice(5, 7), d: +key.slice(8, 10) }; }
+  // Days are stepped in UTC from the y/m/d triple, so DST never shifts a date.
+  function addDays(key, n) {
+    var p = parseKey(key);
+    var t = new Date(Date.UTC(p.y, p.m - 1, p.d + n));
+    return t.getUTCFullYear() + '-' + pad2(t.getUTCMonth() + 1) + '-' + pad2(t.getUTCDate());
+  }
+  function weekdayOf(key) { var p = parseKey(key); return new Date(Date.UTC(p.y, p.m - 1, p.d)).getUTCDay(); }
+  function longDate(key) { var p = parseKey(key); return WD_LONG[weekdayOf(key)] + ', ' + MONTHS[p.m - 1] + ' ' + p.d; }
+  function shortDate(key) { var p = parseKey(key); return MONTHS[p.m - 1].slice(0, 3) + ' ' + p.d; }
+
+  function clock12(p) {
+    var h = p.h % 12; if (h === 0) h = 12;
+    return { hm: h + ':' + pad2(p.mi), ampm: p.h < 12 ? 'AM' : 'PM' };
+  }
+  function timeOf(iso) { return clock12(partsIn(new Date(iso), tz)); }
+  function fmtTime(iso) { var t = timeOf(iso); return t.hm + ' ' + t.ampm; }
+  function fmtRange(ev) {
+    var a = timeOf(ev.start), b = timeOf(ev.end);
+    if (ev.end === ev.start) return a.hm + ' ' + a.ampm;
+    if (a.ampm === b.ampm) return a.hm + ' – ' + b.hm + ' ' + a.ampm;
+    return a.hm + ' ' + a.ampm + ' – ' + b.hm + ' ' + b.ampm;
+  }
+  function fmtStatusTime(date) { var t = clock12(partsIn(date, tz)); return t.hm + t.ampm.toLowerCase(); }
+
+  // ── data → days ──
+  function eventsOn(key) {
+    if (byDay[key]) return byDay[key];
+    var out = [];
+    if (data && data.events) {
+      for (var i = 0; i < data.events.length; i++) {
+        var ev = data.events[i];
+        if (ev.allDay) {
+          var end = ev.end > ev.start ? ev.end : addDays(ev.start, 1);   // Google's end date is exclusive
+          if (ev.start <= key && key < end) out.push(ev);
+        } else if (dayKey(new Date(ev.start)) === key) {
+          out.push(ev);
+        }
+      }
+    }
+    out.sort(function (a, b) {
+      if (a.allDay !== b.allDay) return a.allDay ? -1 : 1;
+      return a.start < b.start ? -1 : a.start > b.start ? 1 : 0;
+    });
+    byDay[key] = out;
+    return out;
+  }
+  function calColor(id) {
+    if (data && data.calendars) {
+      for (var i = 0; i < data.calendars.length; i++) if (data.calendars[i].id === id) return data.calendars[i].color || '';
+    }
+    return '';
+  }
+  function calName(id) {
+    if (data && data.calendars) {
+      for (var i = 0; i < data.calendars.length; i++) if (data.calendars[i].id === id) return data.calendars[i].name || '';
+    }
+    return '';
+  }
+  function inWindow(key) { return key >= addDays(todayKey, -1) && key <= addDays(todayKey, 13); }
+
+  // ── render ──
+  function renderClock() {
+    var now = new Date();
+    var p = partsIn(now, tz);
+    var t = clock12(p);
+    var c = $('clock');
+    c.textContent = t.hm;
+    c.appendChild(el('span', 'ampm', t.ampm));
+    var key = keyOf(p);
+    $('weekday').textContent = WD_LONG[weekdayOf(key)];
+    $('date').textContent = MONTHS[p.m - 1] + ' ' + p.d + ', ' + p.y;
+    if (key !== todayKey) {            // midnight: today moves, the view follows
+      todayKey = key; selectedKey = ''; byDay = {};
+      renderAll();
+    }
+  }
+
+  function renderAgenda() {
+    var key = selectedKey || todayKey;
+    var away = key !== todayKey;
+    var agenda = $('agenda');
+    agenda.className = 'agenda' + (away ? ' away' : '');
+    var label = 'TODAY';
+    if (away) {
+      if (key === addDays(todayKey, 1)) label = 'TOMORROW';
+      else if (key === addDays(todayKey, -1)) label = 'YESTERDAY';
+      else label = WD_LONG[weekdayOf(key)].toUpperCase();
+    }
+    $('agendaLabel').textContent = label;
+    $('agendaDate').textContent = longDate(key);
+    var list = $('agendaList');
+    while (list.firstChild) list.removeChild(list.firstChild);
+    if (!data) { list.appendChild(el('div', 'empty', 'waiting for calendar')); return; }
+    if (!inWindow(key)) { list.appendChild(el('div', 'empty', 'outside the two-week window')); return; }
+    var evs = eventsOn(key);
+    if (!evs.length) { list.appendChild(el('div', 'empty', 'nothing scheduled')); return; }
+    for (var i = 0; i < evs.length; i++) {
+      var ev = evs[i];
+      var row = el('div', 'ev' + (ev.allDay ? ' allday' : '') + (ev.declined ? ' declined' : '') + (ev.status === 'tentative' ? ' tentative' : ''));
+      var color = calColor(ev.cal);
+      if (color) row.style.borderLeftColor = color;
+      row.appendChild(el('div', 'ev-time', ev.allDay ? 'ALL DAY' : fmtRange(ev)));
+      var main = el('div', 'ev-main');
+      main.appendChild(el('div', 'ev-title', ev.title));
+      if (ev.location) main.appendChild(el('div', 'ev-loc', ev.location));
+      var cn = calName(ev.cal);
+      if (cn && data.calendars.length > 1) main.appendChild(el('div', 'ev-cal', cn.toUpperCase()));
+      row.appendChild(main);
+      list.appendChild(row);
+    }
+  }
+
+  function renderStrip() {
+    var strip = $('strip');
+    while (strip.firstChild) strip.removeChild(strip.firstChild);
+    var sel = selectedKey || todayKey;
+    for (var i = 0; i < 7; i++) {
+      var key = addDays(todayKey, i);
+      var cell = el('div', 'day' + (i === 0 ? ' today' : '') + (key === sel && i !== 0 ? ' sel' : ''));
+      cell.setAttribute('data-key', key);
+      var head = el('div', 'day-head');
+      head.appendChild(el('span', 'day-name', i === 0 ? 'TODAY' : WD[weekdayOf(key)]));
+      head.appendChild(el('span', 'day-num', String(parseKey(key).d)));
+      cell.appendChild(head);
+      var box = el('div', 'day-evs');
+      var evs = data ? eventsOn(key) : [];
+      if (!evs.length) box.appendChild(el('div', 'day-none', data ? 'nothing' : ''));
+      var max = 4;
+      for (var j = 0; j < evs.length && j < max; j++) {
+        var ev = evs[j];
+        var line = el('div', 'day-ev' + (ev.declined ? ' declined' : ''));
+        var color = calColor(ev.cal);
+        if (color) line.style.borderLeftColor = color;
+        var t = timeOf(ev.start);
+        line.appendChild(el('span', 't', ev.allDay ? 'ALL' : t.hm + t.ampm.charAt(0).toLowerCase()));
+        line.appendChild(document.createTextNode(ev.title));
+        box.appendChild(line);
+      }
+      if (evs.length > max) box.appendChild(el('div', 'day-more', '+' + (evs.length - max) + ' MORE'));
+      cell.appendChild(box);
+      cell.addEventListener('click', onDayTap);
+      strip.appendChild(cell);
+    }
+  }
+  function onDayTap(e) {
+    var key = e.currentTarget.getAttribute('data-key');
+    selectDay(key);
+  }
+  function selectDay(key) {
+    selectedKey = key === todayKey ? '' : key;
+    renderAgenda(); renderStrip();
+    if (monthCursor) renderMonth();
+  }
+
+  function renderMonth() {
+    var y = monthCursor.y, m = monthCursor.m;
+    $('monthTitle').textContent = MONTHS[m - 1].toUpperCase() + ' ' + y;
+    var grid = $('monthGrid');
+    while (grid.firstChild) grid.removeChild(grid.firstChild);
+    for (var w = 0; w < 7; w++) grid.appendChild(el('div', 'month-wd', WD[w]));
+    var first = y + '-' + pad2(m) + '-01';
+    var lead = weekdayOf(first);
+    var days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    var sel = selectedKey || todayKey;
+    for (var b = 0; b < lead; b++) grid.appendChild(el('div', 'mday blank'));
+    for (var d = 1; d <= days; d++) {
+      var key = y + '-' + pad2(m) + '-' + pad2(d);
+      var cell = el('div', 'mday' + (key === todayKey ? ' today' : '') + (key === sel ? ' sel' : '') + (inWindow(key) ? '' : ' out'));
+      cell.setAttribute('data-key', key);
+      cell.appendChild(el('div', 'n', String(d)));
+      var dots = el('div', 'dots');
+      var n = data && inWindow(key) ? Math.min(eventsOn(key).length, 3) : 0;
+      for (var k = 0; k < n; k++) dots.appendChild(el('span', 'dot'));
+      cell.appendChild(dots);
+      cell.addEventListener('click', onMonthDayTap);
+      grid.appendChild(cell);
+    }
+    var trail = (7 - ((lead + days) % 7)) % 7;
+    for (var t = 0; t < trail; t++) grid.appendChild(el('div', 'mday blank'));
+  }
+  function onMonthDayTap(e) {
+    selectDay(e.currentTarget.getAttribute('data-key'));
+    closeMonth();
+  }
+  function openMonth() {
+    var p = parseKey(selectedKey || todayKey);
+    monthCursor = { y: p.y, m: p.m };
+    renderMonth();
+    $('month').className = 'month open';
+  }
+  function closeMonth() { monthCursor = null; $('month').className = 'month'; }
+  function stepMonth(n) {
+    var m = monthCursor.m + n, y = monthCursor.y;
+    if (m < 1) { m = 12; y--; } else if (m > 12) { m = 1; y++; }
+    monthCursor = { y: y, m: m };
+    renderMonth();
+  }
+
+  function renderAll() { byDay = {}; renderAgenda(); renderStrip(); if (monthCursor) renderMonth(); }
+
+  // ── status ──
+  function setStatus(text, level) {
+    var s = $('status');
+    s.textContent = text;
+    s.className = 'status' + (level ? ' ' + level : '');
+  }
+
+  // ── passphrase: same key and prompt as index.html ──
+  function storedPass() {
+    try { return localStorage.getItem('dexterPass') || ''; } catch (e) { return ''; }
+  }
+  function askPass() {
+    var entered = window.prompt('DEXTER passphrase');
+    if (entered) { try { localStorage.setItem('dexterPass', entered); } catch (e) {} }
+    return !!entered;
+  }
+
+  // ── fetch ──
+  var loading = false;
+  function load(retried) {
+    if (loading && !retried) return;
+    loading = true;
+    return fetch('/api/calendar', { headers: { 'X-Dexter-Passphrase': encodeURIComponent(storedPass()) }, cache: 'no-store' })
+      .then(function (r) {
+        if (r.status === 401) {
+          try { localStorage.removeItem('dexterPass'); } catch (e) {}
+          if (!retried && askPass()) return load(true);
+          setStatus('passphrase needed · tap here', 'warn');
+          loading = false;
+          return;
+        }
+        return r.json().then(function (d) {
+          loading = false;
+          if (!r.ok) {
+            var msg = d && d.error ? d.error : 'calendar unavailable';
+            setStatus(msg + (lastGood ? ' · showing ' + fmtStatusTime(lastGood) : ''), r.status === 503 ? 'warn' : 'bad');
+            return;
+          }
+          data = d;
+          lastGood = new Date();
+          tz = d.tz || DEFAULT_TZ;
+          partFmt = {};
+          var key = dayKey(lastGood);
+          if (key !== todayKey) { todayKey = key; selectedKey = ''; }
+          renderAll();
+          setStatus('updated ' + fmtStatusTime(lastGood));
+        });
+      })
+      .catch(function () {
+        loading = false;
+        setStatus(lastGood ? 'offline · showing ' + fmtStatusTime(lastGood) : 'offline', 'warn');
+      });
+  }
+
+  // ── drawer ──
+  function openDrawer() {
+    var f = $('dexterFrame');
+    if (!f.getAttribute('src')) f.setAttribute('src', '/');
+    $('drawer').className = 'drawer open';
+    $('scrim').className = 'scrim open';
+  }
+  function closeDrawer() {
+    $('drawer').className = 'drawer';
+    $('scrim').className = 'scrim';
+  }
+
+  // ── wire up ──
+  $('monthBtn').addEventListener('click', openMonth);
+  $('monthBtnM').addEventListener('click', openMonth);
+  $('monthClose').addEventListener('click', closeMonth);
+  $('monthPrev').addEventListener('click', function () { stepMonth(-1); });
+  $('monthNext').addEventListener('click', function () { stepMonth(1); });
+  $('dexterBtn').addEventListener('click', openDrawer);
+  $('dexterBtnM').addEventListener('click', openDrawer);
+  $('drawerClose').addEventListener('click', closeDrawer);
+  $('scrim').addEventListener('click', closeDrawer);
+  $('agendaBack').addEventListener('click', function () { selectDay(todayKey); });
+  $('status').addEventListener('click', function () { if (!storedPass() && askPass()) load(); });
+
+  todayKey = dayKey(new Date());
+  renderClock();
+  renderAll();
+  if (!storedPass()) askPass();
+  load();
+  setInterval(renderClock, 1000);
+  setInterval(load, REFRESH_MS);
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && lastGood && Date.now() - lastGood.getTime() > REFRESH_MS) load();
+  });
+})();
+</script>
+</body>
+</html>
