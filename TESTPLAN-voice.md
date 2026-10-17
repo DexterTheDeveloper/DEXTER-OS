@@ -24,6 +24,7 @@ curl -sS -X POST "$BASE/api/chat" -H "Content-Type: application/json" \
   -H "X-Dexter-Passphrase: $PASS" -d '{"module":"COMMAND","text":"Say hello in one sentence."}'
 ```
 Expect `{"content":[{"type":"text","text":"..."}]}`. An `error` here means chat is broken, not just voice.
+A `502` saying `Anthropic rejected ANTHROPIC_API_KEY` is the Anthropic key (or its workspace scope), not the passphrase, and the page leaves the stored passphrase alone. A `404` naming the model means the model string in `functions/api/chat.js` needs changing: chat has no fallback model either.
 
 **Text to speech:**
 

@@ -66,6 +66,9 @@ export async function onRequestPost(context) {
     upstream = await askClaude(env, mod, text, false);
     data = await upstream.json().catch(() => ({}));
   }
+  // A rejected server key must not come back as 401: the page reads 401 as "wrong passphrase" and would wipe
+  // the stored one on every device. Anthropic's own message is not passed through either.
+  if (upstream.status === 401) return json({ error: 'Anthropic rejected ANTHROPIC_API_KEY' }, 502);
   if (!upstream.ok) {
     return json({ error: data?.error?.message || `Claude API error ${upstream.status}` }, upstream.status);
   }
