@@ -6,8 +6,15 @@
 //   DEXTER_PASSPHRASE   12+ characters; the PWA asks for it once and remembers it on that device
 //
 // Without the passphrase gate, anyone who finds the pages.dev URL could spend your Claude credits.
+//
+// Model: claude-opus-5-5. It runs adaptive thinking by default, so the request must not send `thinking`
+// (disabled and budget_tokens are 400s) or temperature, top_p, top_k or tool_choice. Thinking tokens
+// come out of max_tokens. Effort is stated as "medium", which is the model's default.
+// Refusal fallback is a beta (header anthropic-beta plus body field `fallbacks`). If Anthropic changes or
+// retires it, a 400 that names it is retried once without it, so chat never breaks on a beta change.
 
-const MODEL = 'claude-sonnet-5-5';
+const MODEL = 'claude-opus-5-5';
+const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
 
 const SYS = `You are DEXTER, the AI operating system for King Godfrey and the George Street / IIIGLOBE ecosystem.
 
@@ -49,36 +56,48 @@ export async function onRequestPost(context) {
   const mod = typeof body.module === 'string' && body.module ? body.module : 'COMMAND';
   if (!text) return json({ error: 'Missing text' }, 400);
 
-  const upstream = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 2048,
-      // Chat is latency-sensitive: low effort keeps replies quick and short.
-      output_config: { effort: 'low' },
-      system: SYS,
-      messages: [{ role: 'user', content: `[MODULE: ${mod}] ${text}` }],
-    }),
-  });
-
-  const data = await upstream.json().catch(() => ({}));
+  let upstream = await askClaude(env, mod, text, true);
+  let data = await upstream.json().catch(() => ({}));
+  // The fallback beta changed or was retired: retry once without it.
+  if (upstream.status === 400 && /fallbacks|server-side-fallback|anthropic-beta/i.test(data?.error?.message || '')) {
+    upstream = await askClaude(env, mod, text, false);
+    data = await upstream.json().catch(() => ({}));
+  }
   if (!upstream.ok) {
     return json({ error: data?.error?.message || `Claude API error ${upstream.status}` }, upstream.status);
   }
 
   // Replies can include thinking blocks; the PWA only wants the text.
-  const reply = (data.content || [])
+  let reply = (data.content || [])
     .filter((block) => block.type === 'text')
     .map((block) => block.text)
     .join('\n')
     .trim();
+  // A refusal is a normal 200 with stop_reason "refusal": show its text if it has any, else a short line.
+  if (!reply && data.stop_reason === 'refusal') reply = "I can't help with that one.";
   if (!reply) return json({ error: 'Empty reply from Claude' }, 502);
   return json({ content: [{ type: 'text', text: reply }] }, 200);
+}
+
+// withFallbacks adds the refusal-fallback beta (header and body field); without it the request is plain.
+function askClaude(env, mod, text, withFallbacks) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-api-key': env.ANTHROPIC_API_KEY,
+    'anthropic-version': '2023-06-01',
+  };
+  const body = {
+    model: MODEL,
+    max_tokens: 2048,
+    output_config: { effort: 'medium' },
+    system: SYS,
+    messages: [{ role: 'user', content: `[MODULE: ${mod}] ${text}` }],
+  };
+  if (withFallbacks) {
+    headers['anthropic-beta'] = FALLBACK_BETA;
+    body.fallbacks = 'default';
+  }
+  return fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
 }
 
 function decodeHeader(value) {
