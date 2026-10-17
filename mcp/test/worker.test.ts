@@ -471,7 +471,8 @@ describe("end-to-end OAuth with the passphrase", () => {
 			state: "state-123",
 			resource: `${ORIGIN}/mcp`,
 		}).toString();
-		const consent = await SELF.fetch(authorizeUrl, { redirect: "manual" });
+		// GET /authorize is metered per IP, so it carries this test's IP like every other call here.
+		const consent = await SELF.fetch(authorizeUrl, { redirect: "manual", headers: { "CF-Connecting-IP": ip } });
 		expect(consent.status).toBe(200);
 		const html = await consent.text();
 		expect(html).toContain("Test Client");
@@ -574,12 +575,17 @@ describe("end-to-end OAuth with the passphrase", () => {
 	});
 
 	it("locks an IP out after five wrong passphrases", async () => {
-		const client_id = await registerClient();
+		// One consent page, retried on the fresh form each wrong answer brings back (how a person
+		// types a wrong passphrase). That is 8 requests against the 10-a-minute AUTH_RL budget: the
+		// lock-out has to be reachable before the rate limit, which is why this doesn't reopen the
+		// page for every attempt.
+		let { handle, cookies } = await startConsent();
 		for (let i = 0; i < 5; i++) {
-			const { handle, cookies } = await startConsent(client_id);
-			expect((await submit(handle, cookies, `wrong ${i}`)).status).toBe(401);
+			const wrong = await submit(handle, cookies, `wrong ${i}`);
+			expect(wrong.status, `wrong passphrase ${i + 1}`).toBe(401);
+			handle = (await wrong.text()).match(/name="handle" value="([^"]+)"/)![1];
+			cookies = cookieHeader(wrong);
 		}
-		const { handle, cookies } = await startConsent(client_id);
 		const locked = await submit(handle, cookies, "correct horse battery staple");
 		expect(locked.status).toBe(429);
 		expect(locked.headers.get("Retry-After")).toBe("900");
@@ -598,6 +604,10 @@ describe("end-to-end OAuth with the passphrase", () => {
 			return viaWorker(request, custom);
 		}
 
+		function get(path: string, custom: Partial<Env>) {
+			return viaWorker(new Request(`${ORIGIN}${path}`, { headers: { "CF-Connecting-IP": ip, Host: new URL(ORIGIN).host } }), custom);
+		}
+
 		it("returns 429 with Retry-After on /authorize and /register once the limit is hit", async () => {
 			for (const path of ["/authorize", "/register"]) {
 				const response = await post(path, { AUTH_RL: denying });
@@ -607,9 +617,19 @@ describe("end-to-end OAuth with the passphrase", () => {
 			expect((await post("/register", { AUTH_RL: denying })).headers.get("Content-Type")).toContain("application/json");
 		});
 
+		it("meters the consent page too: GET /authorize returns 429 with Retry-After once the limit is hit", async () => {
+			const response = await get("/authorize", { AUTH_RL: denying });
+			expect(response.status).toBe(429);
+			expect(response.headers.get("Retry-After")).toBe("60");
+			expect(response.headers.get("Content-Type")).toContain("text/html");
+			expect(await response.text()).toContain("Too many sign-in attempts");
+		});
+
 		it("fails closed when the limiter itself fails", async () => {
 			expect((await post("/register", { AUTH_RL: broken })).status).toBe(429);
 			expect((await post("/authorize", { AUTH_RL: undefined })).status).toBe(429);
+			expect((await get("/authorize", { AUTH_RL: broken })).status).toBe(429);
+			expect((await get("/authorize", { AUTH_RL: undefined })).status).toBe(429);
 		});
 
 		it("is wired to the real binding: the 11th registration in a minute is refused", async () => {
@@ -625,9 +645,19 @@ describe("end-to-end OAuth with the passphrase", () => {
 			expect(statuses[10], statuses.join(",")).toBe(429);
 		});
 
-		it("does not meter GET requests", async () => {
-			const response = await viaWorker(new Request(`${ORIGIN}/`, { headers: { Host: new URL(ORIGIN).host } }), { AUTH_RL: denying });
-			expect(response.status).toBe(200);
+		it("is wired to the real binding for the consent page: the 11th GET /authorize in a minute is refused", async () => {
+			const open = () => SELF.fetch(`${ORIGIN}/authorize`, { redirect: "manual", headers: { "CF-Connecting-IP": ip } });
+			const statuses: number[] = [];
+			for (let i = 0; i < 11; i++) statuses.push((await open()).status);
+			// No OAuth parameters, so the first ten get the provider's own error page, never a 429.
+			expect(statuses.slice(0, 10).every((s) => s !== 429), statuses.join(",")).toBe(true);
+			expect(statuses[10], statuses.join(",")).toBe(429);
+		});
+
+		it("does not meter the other GET requests: the status page and the OAuth metadata", async () => {
+			for (const path of ["/", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp"]) {
+				expect((await get(path, { AUTH_RL: denying })).status, path).toBe(200);
+			}
 		});
 	});
 

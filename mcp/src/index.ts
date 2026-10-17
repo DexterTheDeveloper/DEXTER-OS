@@ -62,8 +62,12 @@ function providerFor(origin: string, registration: boolean): OAuthProvider<Env> 
 export default {
 	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
-		// The two endpoints that write to KV for anyone who asks are metered per IP first.
-		if (request.method === "POST" && (url.pathname === "/authorize" || url.pathname === "/register")) {
+		// What writes to KV for anyone who asks is metered per IP first, from one shared budget:
+		// the consent page (GET /authorize opens a consent transaction), its submit and registration.
+		const metered =
+			(request.method === "GET" && url.pathname === "/authorize") ||
+			(request.method === "POST" && (url.pathname === "/authorize" || url.pathname === "/register"));
+		if (metered) {
 			const limited = await authRateLimit(env, request);
 			if (limited) return limited;
 		}

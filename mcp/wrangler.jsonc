@@ -20,7 +20,8 @@
     { "binding": "DB", "database_name": "dexter", "database_id": "f1326ef4-4199-49ba-a858-cc78834f8d1a" }
   ],
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "078a71ca655f4762a732d6822c00de63" }],
-  // Per-IP cap on POST /authorize and POST /register, checked before anything is written to KV.
+  // Per-IP cap on GET /authorize (the consent page), POST /authorize and POST /register: one budget
+  // for the three, checked before anything is written to KV.
   // The KV lock-out (5 wrong passphrases per 15 minutes) stays as the second layer.
   "ratelimits": [{ "name": "AUTH_RL", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }],
   // ALLOW_CLIENT_REGISTRATION is deliberately not a var here: the operator sets it to "false" as a

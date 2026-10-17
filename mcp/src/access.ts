@@ -141,9 +141,10 @@ async function recordFailure(env: Env, request: Request): Promise<void> {
 }
 
 /**
- * First layer on POST /authorize and POST /register: the AUTH_RL rate limit (wrangler.jsonc),
- * keyed by client IP, checked before either endpoint writes to KV. Fails closed: a missing or
- * failing limiter refuses the request rather than letting it through unmetered.
+ * First layer on GET /authorize, POST /authorize and POST /register: the AUTH_RL rate limit
+ * (wrangler.jsonc), keyed by client IP and shared by the three, checked before any of them writes
+ * to KV. Fails closed: a missing or failing limiter refuses the request rather than letting it
+ * through unmetered.
  */
 export async function authRateLimit(env: Env, request: Request): Promise<Response | null> {
 	let success: boolean;
