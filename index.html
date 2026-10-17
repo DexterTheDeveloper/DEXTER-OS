@@ -519,6 +519,12 @@
   }
   .ibtn-send:hover, .ibtn-send:active { background: #33ddff; }
 
+  /* Voice on/off: only shown when DEXTER's voice comes from the server (browser has no Web Speech) */
+  .ibtn-spk { background: transparent; color: var(--accent); border-radius: 1px; }
+  .ibtn-spk.off { color: var(--dim); }
+  .ibtn-spk .spk-off, .ibtn-spk.off .spk-on { display: none; }
+  .ibtn-spk.off .spk-off { display: inline; }
+
   .input-footer { display: flex; justify-content: space-between; margin-top: 5px; padding: 0 2px; }
   .hint { font-family: var(--mono); font-size: 7px; color: var(--dim); letter-spacing: 1px; }
   .hint span { color: var(--accent); }
@@ -713,7 +719,7 @@
         </div>
         <div class="sysrow">
           <span class="syslabel">VOICE</span>
-          <span class="sysval">ON</span>
+          <span class="sysval" id="voiceVal">ON</span>
         </div>
       </div>
     </aside>
@@ -767,6 +773,13 @@
           <div class="prompt">&gt;_</div>
           <input type="text" id="userInput" placeholder="Command or question..."
             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+          <button class="ibtn ibtn-spk" id="spkBtn" onclick="toggleVoiceOut()" title="Voice on" style="display:none">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M2 6h3l4-3v10L5 10H2z"/>
+              <path class="spk-on" d="M11 5.5a3.5 3.5 0 010 5M12.8 3.5a6 6 0 010 9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+              <path class="spk-off" d="M11 6l4 4M15 6l-4 4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+          </button>
           <button class="ibtn ibtn-mic" id="micBtn" onclick="toggleVoice()" title="Voice">
             <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
               <path d="M8 1a3 3 0 00-3 3v4a3 3 0 006 0V4a3 3 0 00-3-3zm-5 7a5 5 0 0010 0h-1a4 4 0 01-8 0H3zm5 6v-2H7v2H5v1h6v-1H9z"/>
@@ -917,7 +930,9 @@ function scrollChat() {
 }
 
 // TTS
-function speak(text) {
+function speak(text, native) {
+  // No Web Speech here (wall-calendar WebView): the voice comes from /api/tts instead. See "Server voice".
+  if (!native) { try { if (speakServer(text)) return; } catch (e) {} }
   if (!window.speechSynthesis) return;
   window.speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
@@ -973,6 +988,7 @@ async function send() {
   const txt = inp.value.trim();
   if (!txt) return;
   inp.value = '';
+  try { stopServerSpeech(); } catch (e) {}   // new input cuts off server speech (no-op when it isn't in use)
   addMsg('user', txt);
   setAvatarState('thinking');
   showTyping();
@@ -994,7 +1010,8 @@ let recognition = null;
 
 function toggleVoice() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { addSys('// VOICE: Use Chrome or Safari on iOS 17+'); return; }
+  // No speech recognition here: record and transcribe on the server instead. See "Server voice".
+  if (!SR) { try { toggleRecord().catch(() => {}); } catch (e) {} return; }
   if (isListening) { stopVoice(); return; }
   recognition = new SR();
   recognition.lang = 'en-US';
@@ -1021,6 +1038,286 @@ function stopVoice() {
   try { recognition?.stop(); } catch(e) {}
 }
 
+// ── Server voice ──
+// For browsers with no Web Speech (the wall-calendar WebView). Speech out: the reply goes to /api/tts a few
+// sentences at a time and plays through one shared <audio>. Speech in: MediaRecorder, then /api/stt.
+// Nothing here runs where Web Speech works, so phone and Mac behave exactly as before. If any of it fails,
+// typed chat carries on and a one-line status says why.
+const sv = { audio: null, armed: false, tapped: false, unlocked: false, unlocking: false, off: false, active: false, gen: 0, ctl: null, end: null };
+const rec = { state: 'idle', mr: null, stream: null, chunks: [], timer: 0, ph: '' };  // idle | starting | recording | sending
+try { sv.off = localStorage.getItem('dexterVoiceOff') === '1'; } catch (e) {}
+// 50 ms of silence, played inside the first tap so that later replies may play without one
+const SILENT = 'data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YZABAACA' + 'gICA'.repeat(133);
+const UNLOCK_EVENTS = ['click', 'keydown'];   // pointerdown and touchstart do not count as a gesture for audio
+
+function vnote(msg) { addSys('// VOICE: ' + String(msg).replace(/[<>&]/g, '')); }   // addSys sets innerHTML, so no markup gets through
+
+// No usable Web Speech voice: there is no speechSynthesis, or it still has zero voices after the page has had
+// 3 s to load them. Checked on every reply, so a late voice load hands straight back to the browser's own voice.
+function serverTts() {
+  const s = window.speechSynthesis;
+  return !s || (s.getVoices().length === 0 && performance.now() > 3000);
+}
+
+function svAudio() { return sv.audio || (sv.audio = new Audio()); }
+
+function armServerVoice() {
+  if (sv.armed) return;
+  sv.armed = true;
+  UNLOCK_EVENTS.forEach(ev => document.addEventListener(ev, unlockAudio, true));
+  showVoiceBtn();
+}
+
+// Autoplay: one <audio> is unlocked by playing silence inside a tap, then reused (src swapped) for every clip.
+function unlockAudio() {
+  sv.tapped = true;                                    // the page has been touched: replies may be spoken from now on
+  if (sv.unlocked || sv.unlocking) return;
+  sv.unlocking = true;
+  try {
+    const a = svAudio();
+    a.src = SILENT;
+    Promise.resolve(a.play()).then(() => {
+      sv.unlocked = true;
+      UNLOCK_EVENTS.forEach(ev => document.removeEventListener(ev, unlockAudio, true));
+    }, e => { if (e && e.name !== 'NotAllowedError') sv.unlocked = true; }).then(() => { sv.unlocking = false; });
+  } catch (e) { sv.unlocking = false; }
+}
+
+function showVoiceBtn() {
+  const b = document.getElementById('spkBtn');
+  b.style.display = 'flex';
+  b.classList.toggle('off', sv.off);
+  b.title = sv.off ? 'Voice off' : 'Voice on';
+  const v = document.getElementById('voiceVal');
+  if (v) v.textContent = sv.off ? 'OFF' : 'ON';
+}
+
+function toggleVoiceOut() {
+  sv.off = !sv.off;
+  try { localStorage.setItem('dexterVoiceOff', sv.off ? '1' : '0'); } catch (e) {}
+  if (sv.off) stopServerSpeech();
+  showVoiceBtn();
+}
+
+function svIdle() {
+  sv.active = false; isSpeaking = false;
+  if (!isListening) setAvatarState('standby');
+}
+
+// Cuts off server speech that is loading or playing. A no-op otherwise, so native speech is left alone as before.
+function stopServerSpeech() {
+  if (!sv.active) return;
+  sv.gen++;                                            // anything still queued for the old reply is dropped
+  try { sv.ctl.abort(); } catch (e) {}
+  try { sv.audio.pause(); } catch (e) {}
+  if (sv.end) sv.end();
+  svIdle();
+}
+
+// true = handled here (spoken, or deliberately silent); false = let speak() carry on with the browser's voice.
+function speakServer(text) {
+  const muted = sv.armed && sv.off;                    // the voice button only exists once armed
+  if (!muted && !serverTts()) return false;
+  armServerVoice();
+  // Muted, recording, or nobody has touched the page yet (which also skips the automatic boot greeting): stay quiet.
+  if (muted || rec.state === 'recording' || !sv.tapped) {
+    svIdle();
+    return muted || rec.state === 'recording' || !window.speechSynthesis;
+  }
+  stopServerSpeech();
+  const parts = ttsChunks(text);
+  if (!parts.length) { svIdle(); return true; }
+  const gen = ++sv.gen, ctl = sv.ctl = new AbortController(), st = { err: '' };
+  sv.active = true;
+  const jobs = parts.map(p => fetchTts(p, ctl).catch(e => {
+    st.err = st.err || (e && e.name === 'AbortError' ? 'voice server timed out' : e && e.message) || '';
+    return null;
+  }));
+  playQueue(jobs, gen, text, st).catch(() => { if (gen === sv.gen) svFail(text, '', false); });
+  return true;
+}
+
+// Plays the clips in order; all are requested up front, so the next is usually ready when one ends.
+async function playQueue(jobs, gen, text, st) {
+  const a = svAudio();
+  for (let i = 0; i < jobs.length; i++) {
+    const blob = await jobs[i];
+    if (gen !== sv.gen) return;                        // stopped or replaced while waiting
+    if (!blob) return svFail(text, st.err, i > 0);
+    const url = URL.createObjectURL(blob);
+    let how;
+    try { how = await playClip(a, url); } finally { URL.revokeObjectURL(url); }
+    if (gen !== sv.gen) return;
+    if (how === 'blocked') {                           // autoplay refused: unlock again on the next tap
+      sv.unlocked = sv.tapped = false;
+      UNLOCK_EVENTS.forEach(ev => document.addEventListener(ev, unlockAudio, true));
+      return svFail(text, 'tap the screen once, then ask again', i > 0);
+    }
+    if (how !== 'ended') return svFail(text, 'could not play the audio', i > 0);
+  }
+  svIdle();
+}
+
+// Resolves 'ended', 'error' or 'blocked'; stopServerSpeech() resolves it early via sv.end.
+function playClip(a, url) {
+  return new Promise(resolve => {
+    sv.end = () => resolve('stopped');
+    a.onended = () => resolve('ended');
+    a.onerror = () => resolve('error');
+    a.src = url;
+    Promise.resolve(a.play()).then(() => {
+      if (sv.active && !isSpeaking) { isSpeaking = true; setAvatarState('speaking'); }
+    }, e => resolve(e && e.name === 'NotAllowedError' ? 'blocked' : 'error'));
+  });
+}
+
+// Say why in one line; use the browser's own voice if it has one and nothing has been said yet.
+function svFail(text, err, spoke) {
+  svIdle();
+  vnote((err || 'speech unavailable') + ' (text only)');
+  if (!spoke && window.speechSynthesis) speak(text, true);
+}
+
+// Sentences, with short ones (Dr., G.E.E.K.) joined to the next until a piece is 60+ characters. The reply is
+// capped at 1200 characters like functions/api/tts.js, cut at a sentence end.
+function ttsChunks(text) {
+  let t = String(text).replace(/[*#`]/g, '').replace(/\s+/g, ' ').trim();
+  if (t.length > 1200) {
+    t = t.slice(0, 1200);
+    const k = Math.max(t.lastIndexOf('. '), t.lastIndexOf('! '), t.lastIndexOf('? '));
+    if (k > 0) t = t.slice(0, k + 1);
+  }
+  const out = [];
+  let buf = '';
+  (t.match(/.*?[.!?](?:\s+|$)|.+$/g) || []).forEach(s => {
+    buf += s;
+    if (buf.length >= 60) { out.push(buf.trim()); buf = ''; }
+  });
+  if (buf.trim()) out.push(buf.trim());
+  return out;
+}
+
+async function voiceErr(r) {                          // the server's message, or its status, without a trailing period
+  let m = '';
+  try { m = (await r.json()).error || ''; } catch (e) {}
+  return String(m || 'voice server ' + r.status).replace(/\.+$/, '');
+}
+
+async function fetchTts(text, ctl) {
+  const t = setTimeout(() => ctl.abort(), 30000);      // a stalled server must not leave the page waiting
+  try {
+    const r = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Dexter-Passphrase': encodeURIComponent(storedPass()) },
+      body: JSON.stringify({ text }),
+      signal: ctl.signal
+    });
+    if (!r.ok) throw new Error(await voiceErr(r));
+    return await r.blob();
+  } finally { clearTimeout(t); }
+}
+
+// MIC with no speech recognition: tap to record, tap again (or 15 s) to send. The text goes into the input
+// and is sent like a typed command.
+async function toggleRecord() {
+  if (rec.state === 'recording') { stopRecord(); return; }
+  if (rec.state !== 'idle') return;                    // starting or sending: ignore the tap
+  if (!(window.MediaRecorder && navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+    addSys('// VOICE: Use Chrome or Safari on iOS 17+');
+    return;
+  }
+  rec.state = 'starting';
+  try { stopServerSpeech(); } catch (e) {}             // so the mic does not record DEXTER's own voice
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find(m => MediaRecorder.isTypeSupported(m));
+    const mr = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    rec.mr = mr; rec.stream = stream; rec.chunks = [];
+    mr.ondataavailable = e => { if (e.data && e.data.size) rec.chunks.push(e.data); };
+    mr.onstop = () => { sendRecording(mr); };
+    mr.start();
+  } catch (e) {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    rec.state = 'idle'; rec.mr = rec.stream = null;
+    vnote(e && e.name === 'NotAllowedError' ? 'microphone blocked, type instead' : 'could not record, type instead');
+    return;
+  }
+  const inp = document.getElementById('userInput');
+  rec.ph = inp.placeholder;
+  inp.placeholder = 'Recording... tap MIC';
+  rec.state = 'recording';
+  isListening = true;
+  document.getElementById('micBtn').classList.add('active');
+  setAvatarState('listening');
+  rec.timer = setTimeout(stopRecord, 15000);
+}
+
+function stopRecord() {
+  clearTimeout(rec.timer);
+  const mr = rec.mr;
+  if (!mr) return;
+  try { if (mr.state !== 'inactive') { mr.stop(); return; } } catch (e) {}
+  sendRecording(mr);                                   // already stopped, or stop() failed: use what we have
+}
+
+async function sendRecording(mr) {
+  if (rec.state !== 'recording') return;
+  rec.state = 'sending';
+  try { rec.stream.getTracks().forEach(t => t.stop()); } catch (e) {}   // release the mic
+  isListening = false;
+  document.getElementById('micBtn').classList.remove('active');
+  const inp = document.getElementById('userInput');
+  const blob = new Blob(rec.chunks, { type: mr.mimeType || 'audio/webm' });
+  let text = '', note = '';
+  if (blob.size < 1500) {
+    note = 'too short, tap MIC, speak, tap again';
+  } else {
+    setAvatarState('thinking');
+    inp.placeholder = 'Transcribing...';
+    try { text = await transcribe(blob); } catch (e) {
+      note = (e && e.name === 'AbortError' ? 'voice server timed out' : e && e.message) || 'could not transcribe';
+    }
+    if (!text && !note) note = "didn't catch that";
+  }
+  rec.state = 'idle'; rec.mr = rec.stream = null; rec.chunks = [];
+  inp.placeholder = rec.ph;
+  setAvatarState('standby');
+  if (note) { vnote(note + ', or type'); return; }
+  inp.value = text;
+  setTimeout(send, 300);
+}
+
+async function transcribe(blob) {
+  const ext = /mp4/.test(blob.type) ? 'mp4' : /ogg/.test(blob.type) ? 'ogg' : 'webm';
+  for (let tries = 0; tries < 2; tries++) {
+    const form = new FormData();
+    form.append('audio', blob, 'speech.' + ext);       // the server needs a real file name to pick the decoder
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 30000);
+    try {
+      const r = await fetch('/api/stt', {
+        method: 'POST',
+        headers: { 'X-Dexter-Passphrase': encodeURIComponent(storedPass()) },
+        body: form,
+        signal: ctl.signal
+      });
+      if (r.status === 401 && tries === 0 && askPass()) continue;
+      if (!r.ok) throw new Error(await voiceErr(r));
+      const d = await r.json().catch(() => ({}));
+      return (d.text || '').trim();
+    } finally { clearTimeout(t); }
+  }
+  return '';
+}
+
+function askPass() {                                   // same ask-once-and-remember as callClaude
+  try { localStorage.removeItem('dexterPass'); } catch (e) {}
+  const entered = window.prompt('DEXTER passphrase');
+  if (entered) { try { localStorage.setItem('dexterPass', entered); } catch (e) {} }
+  return !!entered;
+}
+
 // Keyboard
 document.getElementById('userInput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
@@ -1035,6 +1332,7 @@ if ('serviceWorker' in navigator) {
 
 // Init
 if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = () => {};
+try { if (!window.speechSynthesis) armServerVoice(); } catch (e) {}   // no Web Speech: show the voice toggle, ready to unlock audio on the first tap
 setTimeout(() => {
   const msg = 'DEXTER online. King Godfrey mask active. All systems ready. What are we running today?';
   addMsg('dexter', msg);

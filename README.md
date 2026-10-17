@@ -37,6 +37,23 @@ The first time you chat, DEXTER asks for the passphrase and remembers it on that
 
 Optional, stronger: put Cloudflare Access in front of the whole site (Zero Trust → Access → Applications → Self-hosted, domain = your `*.pages.dev` address, policy = your email). The passphrase still applies on top.
 
+### Optional: server voice (wall calendar, and any browser with no Web Speech)
+
+A browser with no `speechSynthesis` or speech recognition (the wall calendar's WebView) gets DEXTER's voice from the server instead: `functions/api/tts.js` turns replies into audio and `functions/api/stt.js` turns the MIC recording into text. Both go through OpenAI, so the key stays server-side and both use the same passphrase gate as chat. Phone and Mac keep using the browser's own voice and recognition and never call them.
+
+Secrets on the Pages project (Settings → Variables and Secrets, type Secret):
+
+- `OPENAI_API_KEY`: new, your OpenAI API key
+- `DEXTER_PASSPHRASE`: already set, nothing to change
+
+```bash
+npx wrangler pages secret put OPENAI_API_KEY --project-name dexter-os
+```
+
+**Redeploy afterwards.** A new secret only takes effect on the next deployment. Until then the endpoints answer `Server missing OPENAI_API_KEY` and the page carries on as typed chat with a one-line note.
+
+Replies are spoken up to 1,200 characters; recordings stop at 15 s (25 MB server cap). Models: `gpt-4o-mini-tts` (falls back to `tts-1`) and `gpt-transcribe` (falls back to `gpt-4o-mini-transcribe`); the `X-Dexter-Model` response header says which one answered. For `wrangler pages dev`, add `OPENAI_API_KEY` to `.dev.vars` too. Manual checks are in `TESTPLAN-voice.md`.
+
 ## Deploy to GitHub Pages (previous, 5 commands)
 
 ```bash
@@ -85,6 +102,7 @@ Works offline after first load (service worker caches assets).
 - iPhone: mic button works in Safari iOS 17+
 - Desktop: Chrome recommended for best voice recognition
 - TTS voice picks the deepest available system voice automatically
+- Wall calendar and other browsers with no Web Speech: voice comes from the server, see "Server voice" above
 - ElevenLabs upgrade: swap the `speak()` function when ready
 
 ---

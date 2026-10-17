@@ -1,4 +1,4 @@
-const CACHE = 'dexter-v1';
+const CACHE = 'dexter-v2';
 const ASSETS = ['/', '/index.html', '/avatar.png', '/manifest.json'];
 
 self.addEventListener('install', e => {
@@ -14,8 +14,8 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  // API calls — always network
-  if (e.request.url.includes('anthropic.com')) return;
+  // API calls (/api/chat, /api/tts, /api/stt) — always network, never cached
+  if (new URL(e.request.url).pathname.startsWith('/api/') || e.request.url.includes('anthropic.com')) return;
   e.respondWith(
     caches.match(e.request).then(cached => cached || fetch(e.request))
   );
