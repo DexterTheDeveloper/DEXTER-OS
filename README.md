@@ -52,7 +52,7 @@ npx wrangler pages secret put OPENAI_API_KEY --project-name dexter-os
 
 **Redeploy afterwards.** A new secret only takes effect on the next deployment. Until then the endpoints answer `Server missing OPENAI_API_KEY` and the page carries on as typed chat with a one-line note.
 
-Replies are spoken up to 1,200 characters; recordings stop at 15 s (25 MB server cap). Models: `gpt-4o-mini-tts` (falls back to `tts-1`) and `gpt-transcribe` (falls back to `gpt-4o-mini-transcribe`); the `X-Dexter-Model` response header says which one answered. For `wrangler pages dev`, add `OPENAI_API_KEY` to `.dev.vars` too. Manual checks are in `TESTPLAN-voice.md`.
+Replies are spoken up to 1,200 characters; recordings stop at 15 s (25 MB server cap). One model each, no fallback: `gpt-4o-mini-tts` (voice `cedar`) and `gpt-transcribe`, so a wrong or retired model name comes back as OpenAI's own error instead of being masked. For `wrangler pages dev`, add `OPENAI_API_KEY` to `.dev.vars` too. Manual checks are in `TESTPLAN-voice.md`.
 
 ## Deploy to GitHub Pages (previous, 5 commands)
 

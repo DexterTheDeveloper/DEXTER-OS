@@ -31,22 +31,20 @@ Expect `{"content":[{"type":"text","text":"..."}]}`. An `error` here means chat 
 curl -sS -X POST "$BASE/api/tts" -H "Content-Type: application/json" \
   -H "X-Dexter-Passphrase: $PASS" -d '{"text":"DEXTER online. All systems ready."}' \
   -D /tmp/dexter-tts.headers -o /tmp/dexter-tts.mp3
-head -1 /tmp/dexter-tts.headers; grep -i -E '^(content-type|x-dexter-model)' /tmp/dexter-tts.headers
+head -1 /tmp/dexter-tts.headers; grep -i '^content-type' /tmp/dexter-tts.headers
 file /tmp/dexter-tts.mp3; afplay /tmp/dexter-tts.mp3
 ```
 Expect `200`, `content-type: audio/mpeg`, a file `file` calls MPEG layer III, and a low male voice (cedar) saying the line.
-`x-dexter-model: gpt-4o-mini-tts` is the primary. If it says `tts-1`, the primary was refused and the fallback answered: check the model name against your OpenAI account.
-Voice override: add `"voice":"onyx"` to the JSON and listen for a different voice.
+There is one model (`gpt-4o-mini-tts`) and no fallback. If OpenAI rejects the model name you get its own message back as JSON (for example `404 The model ... does not exist`) instead of audio. That means the name in `functions/api/tts.js` needs changing; nothing is masked.
 
 **Speech to text** (round trip: feed the mp3 back in):
 
 ```bash
-curl -sS -D /tmp/dexter-stt.headers -X POST "$BASE/api/stt" -H "X-Dexter-Passphrase: $PASS" \
+curl -sS -X POST "$BASE/api/stt" -H "X-Dexter-Passphrase: $PASS" \
   -F "audio=@/tmp/dexter-tts.mp3;type=audio/mpeg"
-grep -i '^x-dexter-model' /tmp/dexter-stt.headers
 ```
-Expect `{"text":"DEXTER online. All systems ready."}` (wording may differ slightly) and `x-dexter-model: gpt-transcribe`.
-`gpt-4o-mini-transcribe` there means the primary was refused and the fallback answered.
+Expect `{"text":"DEXTER online. All systems ready."}` (wording may differ slightly).
+Same rule: one model (`gpt-transcribe`), so a wrong name shows up here as OpenAI's own error.
 Also try the Safari-style container the iPhone and calendar-class devices may produce:
 
 ```bash
@@ -61,7 +59,6 @@ curl -sS -X POST "$BASE/api/stt" -H "X-Dexter-Passphrase: $PASS" -F "audio=@/tmp
 | tts or stt with a wrong passphrase | `401 {"error":"Wrong or missing passphrase."}` |
 | tts or stt with no passphrase header | `401`, same body |
 | tts with `{"text":"   "}` | `400 {"error":"Missing text"}` |
-| tts with `{"text":"hi","voice":"../x"}` | `400 {"error":"Invalid voice"}` |
 | stt with a JSON body instead of a file | `400` |
 | any call before the secret is set and redeployed | `500 {"error":"Server missing OPENAI_API_KEY"}` |
 

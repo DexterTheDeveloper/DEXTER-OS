@@ -7,11 +7,12 @@
 //   DEXTER_PASSPHRASE   already set for chat.js; the same gate applies here
 //
 // POST /api/stt  multipart/form-data, field "audio" (webm/opus or mp4/aac, 25 MB max)  ->  { text }
-// The X-Dexter-Model response header says which model answered, so a silent fall back is visible.
+// Transcribed by gpt-transcribe. One model, with no fallback: a wrong or retired model name must fail
+// loudly, not be masked.
 //
 // The gate above and the helpers from decodeHeader down are copied from chat.js. Keep them in step.
 
-const MODELS = ['gpt-transcribe', 'gpt-4o-mini-transcribe'];
+const MODEL = 'gpt-transcribe';
 const MAX_BYTES = 25 * 1024 * 1024;
 // OpenAI picks the decoder from the file name, so the clip always goes upstream with a real extension.
 const EXT = {
@@ -49,43 +50,32 @@ export async function onRequestPost(context) {
   if (!audio.size) return json({ error: 'Empty audio' }, 400);
   if (audio.size > MAX_BYTES) return json({ error: 'Audio too large (25 MB max)' }, 413);
 
-  const name = `speech.${extFor(audio)}`;
-  let failure = { error: 'Could not reach OpenAI', status: 502 };
-  for (const model of MODELS) {
-    // One form per attempt, so the fallback never depends on what the first try did to its form.
-    const out = new FormData();
-    out.append('file', audio, name);
-    out.append('model', model);
-    out.append('language', 'en');
-    out.append('response_format', 'json');
+  const out = new FormData();
+  out.append('file', audio, `speech.${extFor(audio)}`);
+  out.append('model', MODEL);
+  out.append('language', 'en');
+  out.append('response_format', 'json');
 
-    let upstream;
-    try {
-      upstream = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
-        body: out,
-      });
-    } catch {
-      failure = { error: 'Could not reach OpenAI', status: 502 };
-      continue;
-    }
-
-    const data = await upstream.json().catch(() => ({}));
-    if (upstream.ok) {
-      const res = json({ text: typeof data.text === 'string' ? data.text.trim() : '' }, 200);
-      res.headers.set('X-Dexter-Model', model);
-      return res;
-    }
-    // A rejected server key must not come back as 401, which the page reads as "wrong passphrase".
-    // OpenAI's own message quotes part of the key, so it is not passed through either.
-    if (upstream.status === 401) return json({ error: 'OpenAI rejected OPENAI_API_KEY' }, 502);
-    failure = {
-      error: data?.error?.message || `OpenAI error ${upstream.status}`,
-      status: upstream.status >= 400 && upstream.status < 600 ? upstream.status : 502,
-    };
+  let upstream;
+  try {
+    upstream = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
+      body: out,
+    });
+  } catch {
+    return json({ error: 'Could not reach OpenAI' }, 502);
   }
-  return json({ error: failure.error }, failure.status);
+
+  const data = await upstream.json().catch(() => ({}));
+  if (upstream.ok) return json({ text: typeof data.text === 'string' ? data.text.trim() : '' }, 200);
+  // A rejected server key must not come back as 401, which the page reads as "wrong passphrase".
+  // OpenAI's own message quotes part of the key, so it is not passed through either.
+  if (upstream.status === 401) return json({ error: 'OpenAI rejected OPENAI_API_KEY' }, 502);
+  return json(
+    { error: data?.error?.message || `OpenAI error ${upstream.status}` },
+    upstream.status >= 400 && upstream.status < 600 ? upstream.status : 502,
+  );
 }
 
 // The extension comes from the clip's MIME type, then from its file name, else webm (what Chrome records).
