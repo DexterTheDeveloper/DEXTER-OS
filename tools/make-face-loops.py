@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Generate DEXTER's four face loops from the existing neon-helmet art. Procedural only: no new art.
 
-    python3 tools/make-face-loops.py --src /path/to/dexter_face.png --out . [--frames DIR] [--sheet DIR]
+    python3 tools/make-face-loops.py --out . [--src tools/face-source.png] [--frames DIR] [--sheet DIR]
+
+SOURCE: tools/face-source.png is a byte copy of /Users/iiiglobe/dexter/assets/dexter_face.png (1024x1024,
+sha256 1a701b16d221b5cc7153494f1f374516fc8e8cc8226b34835b36d053b53ddb8c). The loops come from THAT file, not
+from the repo's avatar.png, which is a lighter re-encode of the same art. A future Kling regeneration should
+start from the same source.
 
 Needs Pillow + numpy + ffmpeg (libvpx-vp9, libwebp_anim). Writes avatar-{idle,listening,thinking,speaking}.webm
 and the same names as animated .webp. Kling-made loops can replace them later under the same names.
@@ -181,7 +186,7 @@ def contact_sheet(d, n, path, cols=8):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--src', required=True)
+    ap.add_argument('--src', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'face-source.png'))
     ap.add_argument('--out', default='.')
     ap.add_argument('--frames', default=None, help='keep PNG frames here (default: temp dir)')
     ap.add_argument('--sheet', default=None, help='write a contact sheet per state here')
