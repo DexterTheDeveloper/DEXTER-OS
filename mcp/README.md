@@ -47,6 +47,7 @@ Create an Access for SaaS (OIDC) app with redirect URL `https://dexter-mcp.<your
 
 | Name | Purpose |
 |---|---|
+| `ALLOW_CLIENT_REGISTRATION` | Set to `false` (as a secret, so it survives deploys) once every assistant is connected: `/register` then answers 403 and the OAuth metadata stops advertising it. Connected apps keep working; their registrations last 90 days and renew on use |
 | `NTFY_TOPIC` | Pin your own ntfy topic instead of the generated one |
 | `NTFY_SERVER`, `NTFY_TOKEN` | Self-hosted or authenticated ntfy |
 | `MEMORY_STORE_ID`, `REFERENCE_STORE_ID` | Pin specific memory stores |

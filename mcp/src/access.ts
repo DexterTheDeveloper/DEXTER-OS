@@ -353,6 +353,17 @@ export async function handleAuthRequest(request: Request, env: Env, _ctx: Execut
 		return page("DEXTER MCP", `<div class="card">${status}</div>`);
 	}
 
+	// Only reached when ALLOW_CLIENT_REGISTRATION is "false": the provider isn't serving /register.
+	if (url.pathname === "/register") {
+		return Response.json(
+			{
+				error: "access_denied",
+				error_description: "DEXTER isn't accepting new app registrations. Apps already connected keep working.",
+			},
+			{ status: 403, headers: { "Cache-Control": "no-store" } },
+		);
+	}
+
 	if ((url.pathname === "/authorize" || url.pathname === "/callback") && missing.length) {
 		return page(
 			"DEXTER setup",

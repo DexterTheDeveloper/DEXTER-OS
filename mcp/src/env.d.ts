@@ -24,6 +24,14 @@ declare global {
 		/** Access mode only: the one email allowed to connect. Everyone else is refused. */
 		ALLOWED_EMAIL?: string;
 
+		/**
+		 * Dynamic client registration (POST /register) is on unless this is "false". Set it as a
+		 * secret (`wrangler secret put ALLOW_CLIENT_REGISTRATION`) once every assistant is connected:
+		 * a secret survives deploys, and a plain var of the same name would collide with it.
+		 * Registrations already made keep working for 90 days and renew when they are used.
+		 */
+		ALLOW_CLIENT_REGISTRATION?: string;
+
 		/** Optional push settings. A private topic is generated when NTFY_TOPIC is unset. */
 		NTFY_TOPIC?: string;
 		NTFY_SERVER?: string;

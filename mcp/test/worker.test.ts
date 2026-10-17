@@ -168,6 +168,33 @@ describe("OAuth surface", () => {
 		expect(html).not.toContain("test-secret");
 	});
 
+	it("turns dynamic client registration off when ALLOW_CLIENT_REGISTRATION is false", async () => {
+		fetchSpy.mockRestore();
+		const off = { ALLOW_CLIENT_REGISTRATION: "false" };
+		const registration = await viaWorker(
+			new Request(`${ORIGIN}/register`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Host: new URL(ORIGIN).host, "CF-Connecting-IP": ip },
+				body: JSON.stringify({ client_name: "Late Comer", redirect_uris: ["https://late.example.com/cb"] }),
+			}),
+			off,
+		);
+		expect(registration.status).toBe(403);
+		expect(((await registration.json()) as Json).error).toBe("access_denied");
+
+		const metadata = (await (
+			await viaWorker(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`, { headers: { Host: new URL(ORIGIN).host } }), off)
+		).json()) as Json;
+		expect(metadata.registration_endpoint).toBeUndefined();
+		expect(metadata.token_endpoint).toBe(`${ORIGIN}/token`);
+
+		// The default, and anything other than "false", keeps it on.
+		const on = (await viaWorker(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`, { headers: { Host: new URL(ORIGIN).host } }), {
+			ALLOW_CLIENT_REGISTRATION: "yes",
+		}).then((r) => r.json())) as Json;
+		expect(on.registration_endpoint).toBe(`${ORIGIN}/register`);
+	});
+
 	it("rejects tokens that weren't issued to the operator", async () => {
 		expect((await rpc("tools/list", {}, { operator: false })).status).toBe(403);
 	});

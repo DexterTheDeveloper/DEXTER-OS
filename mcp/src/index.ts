@@ -28,12 +28,18 @@ export const mcpApiHandler = {
 	},
 };
 
+/** Dynamic client registration stays on unless ALLOW_CLIENT_REGISTRATION is "false" (see env.d.ts). */
+export function registrationAllowed(env: Env): boolean {
+	return (env.ALLOW_CLIENT_REGISTRATION ?? "true").trim().toLowerCase() !== "false";
+}
+
 // The protected-resource URL has to be absolute, and the workers.dev subdomain isn't known at build
-// time, so one provider is built per origin the Worker is reached on.
+// time, so one provider is built per origin the Worker is reached on (and per registration setting).
 const providers = new Map<string, OAuthProvider<Env>>();
 
-function providerFor(origin: string): OAuthProvider<Env> {
-	let provider = providers.get(origin);
+function providerFor(origin: string, registration: boolean): OAuthProvider<Env> {
+	const key = `${origin} ${registration ? "with" : "without"} registration`;
+	let provider = providers.get(key);
 	if (!provider) {
 		provider = new OAuthProvider<Env>({
 			apiRoute: "/mcp",
@@ -41,11 +47,13 @@ function providerFor(origin: string): OAuthProvider<Env> {
 			defaultHandler: { fetch: handleAuthRequest },
 			authorizeEndpoint: "/authorize",
 			tokenEndpoint: "/token",
-			clientRegistrationEndpoint: "/register",
+			// Left out entirely when registration is off: the provider then neither serves nor
+			// advertises /register, and the request falls through to handleAuthRequest's 403.
+			...(registration ? { clientRegistrationEndpoint: "/register" } : {}),
 			clientIdMetadataDocumentEnabled: true,
 			resourceMetadata: { resource: `${origin}/mcp`, resource_name: "DEXTER" },
 		});
-		if (providers.size < 8) providers.set(origin, provider);
+		if (providers.size < 8) providers.set(key, provider);
 	}
 	return provider;
 }
@@ -58,7 +66,7 @@ export default {
 			const limited = await authRateLimit(env, request);
 			if (limited) return limited;
 		}
-		return providerFor(url.origin).fetch(request, env, ctx);
+		return providerFor(url.origin, registrationAllowed(env)).fetch(request, env, ctx);
 	},
 	async scheduled(_controller, env, ctx) {
 		ctx.waitUntil(deliverDueReminders(env));
