@@ -13,7 +13,7 @@ Claude-powered brain · Voice I/O · PWA (installs to iPhone home screen)
 4. Save and Deploy — first build takes ~1 min, gives a `*.pages.dev` URL
 5. To attach a custom domain: project → Custom domains → Add a domain, then follow the DNS instructions shown
 
-The frontend is fully static (`index.html`, `manifest.json`, `sw.js`, `avatar.png`); `functions/api/chat.js` is a Pages Function that ships automatically alongside it — no separate Worker to deploy. `wrangler.toml` mirrors these settings for CLI deploys (`wrangler pages deploy .`) if you ever want those instead of the Git integration.
+The frontend is fully static (`index.html`, `manifest.json`, `sw.js`, `avatar.png`, plus the eight face loops `avatar-{idle,listening,thinking,speaking}.{webm,webp}` that `sw.js` precaches); `functions/api/chat.js` is a Pages Function that ships automatically alongside it — no separate Worker to deploy. `wrangler.toml` mirrors these settings for CLI deploys (`wrangler pages deploy .`) if you ever want those instead of the Git integration.
 
 ### Required: set the Anthropic API key (server-side only)
 
@@ -113,8 +113,9 @@ Works offline after first load (service worker caches assets).
 |---|---|
 | `index.html` | Full DEXTER interface (desktop + mobile) |
 | `avatar.png` | King Godfrey neon helmet avatar |
+| `avatar-idle.webm` … `avatar-speaking.webp` | Face loops, one WebM + one animated-WebP fallback per state (idle / listening / thinking / speaking); generated from the same art by `tools/make-face-loops.py`, no new art. Kling-made loops can replace them under the same names |
 | `manifest.json` | PWA config (name, icon, standalone mode) |
-| `sw.js` | Service worker (offline caching) |
+| `sw.js` | Service worker (offline caching, incl. the face loops; answers `<video>` Range requests from cache) |
 
 ---
 
