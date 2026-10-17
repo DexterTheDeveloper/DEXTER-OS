@@ -199,6 +199,14 @@ describe("OAuth surface", () => {
 		expect((await rpc("tools/list", {}, { operator: false })).status).toBe(403);
 	});
 
+	it("rejects a token with no email once ALLOWED_EMAIL is set", async () => {
+		const allowed = { ALLOWED_EMAIL: "operator@example.com" };
+		expect((await rpc("tools/list", {}, { email: "" }, allowed)).status).toBe(403);
+		expect((await rpc("tools/list", {}, { email: undefined }, allowed)).status).toBe(403);
+		const matching = await rpc("tools/list", {}, { email: "Operator@Example.com" }, allowed);
+		expect(matching.result?.tools?.map((t: Json) => t.name)).toEqual([...TOOL_NAMES]);
+	});
+
 	it("rejects an Access identity that isn't ALLOWED_EMAIL", async () => {
 		const ctx = createExecutionContext() as ExecutionContext & { props?: Json };
 		ctx.props = { operator: true, email: "someone@else.com", sub: "x", client: "Claude" };

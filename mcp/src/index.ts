@@ -16,9 +16,10 @@ import { sameEmail } from "./util";
 export const mcpApiHandler = {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const props = (ctx as ExecutionContext & { props?: Partial<DexterProps> }).props ?? {};
-		// Tokens are only issued to the operator; this is the second lock. In Access mode the
-		// signed-in email must still match ALLOWED_EMAIL.
-		const emailOk = !env.ALLOWED_EMAIL || !props.email || sameEmail(props.email, env.ALLOWED_EMAIL);
+		// Tokens are only issued to the operator; this is the second lock. Once ALLOWED_EMAIL is
+		// set, the token must carry that email: one with none (issued by the passphrase page before
+		// Access was added) is refused too, so adding Access retires every earlier token.
+		const emailOk = !env.ALLOWED_EMAIL || sameEmail(props.email, env.ALLOWED_EMAIL);
 		if (props.operator !== true || !emailOk) {
 			return Response.json({ error: "forbidden" }, { status: 403 });
 		}

@@ -41,7 +41,7 @@ ChatGPT works the same way: Settings → Apps → Advanced settings → turn on 
 
 ## Optional: Cloudflare Access instead of the passphrase
 
-Create an Access for SaaS (OIDC) app with redirect URL `https://dexter-mcp.<your-subdomain>.workers.dev/callback` and a policy for your email, then add secrets `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET`, `ACCESS_ISSUER` and `ALLOWED_EMAIL`. When those are set, the consent page hands off to Access sign-in instead of asking for the passphrase.
+Create an Access for SaaS (OIDC) app with redirect URL `https://dexter-mcp.<your-subdomain>.workers.dev/callback` and a policy for your email, then add secrets `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET`, `ACCESS_ISSUER` and `ALLOWED_EMAIL`. When those are set, the consent page hands off to Access sign-in instead of asking for the passphrase. Tokens issued earlier by the passphrase page carry no email, so they stop working the moment `ALLOWED_EMAIL` is set: connect each app again.
 
 ## Other settings
 
@@ -57,7 +57,7 @@ Create an Access for SaaS (OIDC) app with redirect URL `https://dexter-mcp.<your
 
 ```bash
 npm install          # .npmrc sets legacy-peer-deps for the agents package
-npm test             # 25 tests in the Workers runtime, including a full OAuth round trip
+npm test             # 39 tests in the Workers runtime, including a full OAuth round trip
 npm run typecheck
 npx wrangler dev     # local server on :8788 (needs a .dev.vars with the secrets)
 ```
