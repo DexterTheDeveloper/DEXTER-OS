@@ -29,9 +29,16 @@ export const mcpApiHandler = {
 	},
 };
 
-/** Dynamic client registration stays on unless ALLOW_CLIENT_REGISTRATION is "false" (see env.d.ts). */
+/**
+ * Dynamic client registration is open only while ALLOW_CLIENT_REGISTRATION is unset or exactly
+ * "true" (any case). Every other value closes it: "false", "no", "off", "0", an empty string, a
+ * stray space, a typo. That is deliberate: the one value that leaves an unauthenticated endpoint
+ * open has to be spelled right, so a misspelled "false" can't leave it open. String() so a JSON
+ * var (false, 0) is read as the text it spells instead of throwing and taking the Worker down.
+ */
 export function registrationAllowed(env: Env): boolean {
-	return (env.ALLOW_CLIENT_REGISTRATION ?? "true").trim().toLowerCase() !== "false";
+	const value = env.ALLOW_CLIENT_REGISTRATION;
+	return value === undefined || String(value).toLowerCase() === "true";
 }
 
 // The protected-resource URL has to be absolute, and the workers.dev subdomain isn't known at build

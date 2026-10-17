@@ -25,10 +25,12 @@ declare global {
 		ALLOWED_EMAIL?: string;
 
 		/**
-		 * Dynamic client registration (POST /register) is on unless this is "false". Set it as a
-		 * secret (`wrangler secret put ALLOW_CLIENT_REGISTRATION`) once every assistant is connected:
-		 * a secret survives deploys, and a plain var of the same name would collide with it.
-		 * Registrations already made keep working for 90 days and renew when they are used.
+		 * Dynamic client registration (POST /register) is open only while this is unset or "true"
+		 * (any case). Any other value turns it off, a typo or "no" or "0" included, so it fails
+		 * closed. Set it to "false" as a secret (`wrangler secret put ALLOW_CLIENT_REGISTRATION`)
+		 * once every assistant is connected: a secret survives deploys, and a plain var of the same
+		 * name would collide with it. Registrations already made keep working for 90 days and renew
+		 * when they are used.
 		 */
 		ALLOW_CLIENT_REGISTRATION?: string;
 

@@ -25,7 +25,8 @@
   // The KV lock-out (5 wrong passphrases per 15 minutes) stays as the second layer.
   "ratelimits": [{ "name": "AUTH_RL", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }],
   // ALLOW_CLIENT_REGISTRATION is deliberately not a var here: the operator sets it to "false" as a
-  // secret once every assistant is connected, and a var of the same name would collide with it.
+  // secret once every assistant is connected (registration is open only while it is unset or
+  // "true"), and a var of the same name would collide with it.
   "vars": { "DEXTER_TZ": "America/New_York" },
   "dev": { "port": 8788 }
 }

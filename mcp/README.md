@@ -47,7 +47,7 @@ Create an Access for SaaS (OIDC) app with redirect URL `https://dexter-mcp.<your
 
 | Name | Purpose |
 |---|---|
-| `ALLOW_CLIENT_REGISTRATION` | Set to `false` (as a secret, so it survives deploys) once every assistant is connected: `/register` then answers 403 and the OAuth metadata stops advertising it. Connected apps keep working; their registrations last 90 days and renew on use |
+| `ALLOW_CLIENT_REGISTRATION` | Registration is open only while this is unset or `true` (any case). Set it to `false` (as a secret, so it survives deploys) once every assistant is connected: `/register` then answers 403 and the OAuth metadata stops advertising it. Any other value (`no`, `0`, a typo, even a stray space) closes it too, on purpose. Connected apps keep working; their registrations last 90 days and renew on use |
 | `NTFY_TOPIC` | Pin your own ntfy topic instead of the generated one |
 | `NTFY_SERVER`, `NTFY_TOKEN` | Self-hosted or authenticated ntfy |
 | `MEMORY_STORE_ID`, `REFERENCE_STORE_ID` | Pin specific memory stores |
@@ -57,7 +57,7 @@ Create an Access for SaaS (OIDC) app with redirect URL `https://dexter-mcp.<your
 
 ```bash
 npm install          # .npmrc sets legacy-peer-deps for the agents package
-npm test             # 41 tests in the Workers runtime, including a full OAuth round trip
+npm test             # 58 tests in the Workers runtime, including a full OAuth round trip
 npm run typecheck
 npx wrangler dev     # local server on :8788 (needs a .dev.vars with the secrets)
 ```

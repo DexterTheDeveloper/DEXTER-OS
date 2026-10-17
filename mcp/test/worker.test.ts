@@ -168,31 +168,61 @@ describe("OAuth surface", () => {
 		expect(html).not.toContain("test-secret");
 	});
 
-	it("turns dynamic client registration off when ALLOW_CLIENT_REGISTRATION is false", async () => {
-		fetchSpy.mockRestore();
-		const off = { ALLOW_CLIENT_REGISTRATION: "false" };
-		const registration = await viaWorker(
-			new Request(`${ORIGIN}/register`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Host: new URL(ORIGIN).host, "CF-Connecting-IP": ip },
-				body: JSON.stringify({ client_name: "Late Comer", redirect_uris: ["https://late.example.com/cb"] }),
-			}),
-			off,
+	describe("ALLOW_CLIENT_REGISTRATION fails closed", () => {
+		const host = new URL(ORIGIN).host;
+		const registrationBody = JSON.stringify({ client_name: "Late Comer", redirect_uris: ["https://late.example.com/cb"] });
+
+		// A fresh IP per call: the real AUTH_RL budget is 10 a minute per IP, and these make many calls.
+		const register = (custom: Partial<Env>) =>
+			viaWorker(
+				new Request(`${ORIGIN}/register`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Host: host, "CF-Connecting-IP": randomIp() },
+					body: registrationBody,
+				}),
+				custom,
+			);
+		const metadata = async (custom: Partial<Env>) =>
+			(await viaWorker(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`, { headers: { Host: host } }), custom).then((r) =>
+				r.json(),
+			)) as Json;
+
+		// "false" is the documented way off. Everything else here is a value somebody might type
+		// meaning off (or mistype meaning on): none of them may leave registration open. Whitespace
+		// and a typo of "true" are in the list because only the exact word opens it.
+		it.each(["false", "FALSE", "no", "off", "0", "maybe", "yes", "1", "", " ", " true", "true ", "ttrue"])(
+			"closes registration for the value %j",
+			async (value) => {
+				const off = { ALLOW_CLIENT_REGISTRATION: value };
+				const registration = await register(off);
+				expect(registration.status).toBe(403);
+				expect(((await registration.json()) as Json).error).toBe("access_denied");
+
+				const advertised = await metadata(off);
+				expect(advertised.registration_endpoint).toBeUndefined();
+				expect(advertised.token_endpoint).toBe(`${ORIGIN}/token`);
+			},
 		);
-		expect(registration.status).toBe(403);
-		expect(((await registration.json()) as Json).error).toBe("access_denied");
 
-		const metadata = (await (
-			await viaWorker(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`, { headers: { Host: new URL(ORIGIN).host } }), off)
-		).json()) as Json;
-		expect(metadata.registration_endpoint).toBeUndefined();
-		expect(metadata.token_endpoint).toBe(`${ORIGIN}/token`);
+		it.each([
+			["unset", undefined],
+			["true", "true"],
+			["TRUE", "TRUE"],
+			["True", "True"],
+		])("leaves registration open when the value is %s", async (_label, value) => {
+			const on = { ALLOW_CLIENT_REGISTRATION: value };
+			const registration = await register(on);
+			expect(registration.status).toBeLessThan(300);
+			expect(((await registration.json()) as Json).client_id).toBeTruthy();
+			expect((await metadata(on)).registration_endpoint).toBe(`${ORIGIN}/register`);
+		});
 
-		// The default, and anything other than "false", keeps it on.
-		const on = (await viaWorker(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`, { headers: { Host: new URL(ORIGIN).host } }), {
-			ALLOW_CLIENT_REGISTRATION: "yes",
-		}).then((r) => r.json())) as Json;
-		expect(on.registration_endpoint).toBe(`${ORIGIN}/register`);
+		it("does not throw on a JSON var: a boolean false closes it, a boolean true leaves it open", async () => {
+			const asVar = (value: unknown) => ({ ALLOW_CLIENT_REGISTRATION: value }) as unknown as Partial<Env>;
+			expect((await register(asVar(false))).status).toBe(403);
+			expect((await metadata(asVar(false))).registration_endpoint).toBeUndefined();
+			expect((await register(asVar(true))).status).toBeLessThan(300);
+		});
 	});
 
 	it("rejects tokens that weren't issued to the operator", async () => {
@@ -411,9 +441,12 @@ describe("protocol eras", () => {
 
 /** A fresh client IP per test: the rate limiter and the lock-out counter are both keyed by it. */
 let ip = "";
-beforeEach(() => {
+function randomIp(): string {
 	const [a, b, c] = crypto.getRandomValues(new Uint8Array(3));
-	ip = `10.${a}.${b}.${c}`;
+	return `10.${a}.${b}.${c}`;
+}
+beforeEach(() => {
+	ip = randomIp();
 });
 
 /** Sends a request straight into the Worker's fetch handler with a modified environment. */
