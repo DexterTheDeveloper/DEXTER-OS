@@ -1,6 +1,6 @@
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp/server";
-import { handleAuthRequest, type DexterProps } from "./access";
+import { authRateLimit, handleAuthRequest, type DexterProps } from "./access";
 import { deliverDueReminders } from "./reminders";
 import { buildServer } from "./server";
 import { sameEmail } from "./util";
@@ -51,8 +51,14 @@ function providerFor(origin: string): OAuthProvider<Env> {
 }
 
 export default {
-	fetch(request, env, ctx) {
-		return providerFor(new URL(request.url).origin).fetch(request, env, ctx);
+	async fetch(request, env, ctx) {
+		const url = new URL(request.url);
+		// The two endpoints that write to KV for anyone who asks are metered per IP first.
+		if (request.method === "POST" && (url.pathname === "/authorize" || url.pathname === "/register")) {
+			const limited = await authRateLimit(env, request);
+			if (limited) return limited;
+		}
+		return providerFor(url.origin).fetch(request, env, ctx);
 	},
 	async scheduled(_controller, env, ctx) {
 		ctx.waitUntil(deliverDueReminders(env));

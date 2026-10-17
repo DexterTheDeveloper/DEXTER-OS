@@ -2,7 +2,7 @@ import { createExecutionContext, env, SELF, waitOnExecutionContext } from "cloud
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleAuthRequest } from "../src/access";
 import { resetSchemaCache } from "../src/db";
-import { mcpApiHandler } from "../src/index";
+import worker, { mcpApiHandler } from "../src/index";
 import { deliverDueReminders } from "../src/reminders";
 import { TOOL_NAMES } from "../src/server";
 
@@ -319,6 +319,21 @@ describe("protocol eras", () => {
 	});
 });
 
+/** A fresh client IP per test: the rate limiter and the lock-out counter are both keyed by it. */
+let ip = "";
+beforeEach(() => {
+	const [a, b, c] = crypto.getRandomValues(new Uint8Array(3));
+	ip = `10.${a}.${b}.${c}`;
+});
+
+/** Sends a request straight into the Worker's fetch handler with a modified environment. */
+async function viaWorker(request: Request, custom: Partial<Env>): Promise<Response> {
+	const ctx = createExecutionContext();
+	const response = await worker.fetch(request as Parameters<typeof worker.fetch>[0], { ...env, ...custom } as Env, ctx);
+	await waitOnExecutionContext(ctx);
+	return response;
+}
+
 describe("end-to-end OAuth with the passphrase", () => {
 	const REDIRECT = "https://client.example.com/callback";
 
@@ -337,10 +352,10 @@ describe("end-to-end OAuth with the passphrase", () => {
 			.map((cookie) => cookie.split(";")[0])
 			.join("; ");
 
-	async function startConsent() {
+	async function registerClient(): Promise<string> {
 		const registration = await SELF.fetch(`${ORIGIN}/register`, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
 			body: JSON.stringify({
 				client_name: "Test Client",
 				redirect_uris: [REDIRECT],
@@ -350,8 +365,11 @@ describe("end-to-end OAuth with the passphrase", () => {
 			}),
 		});
 		expect(registration.status).toBeLessThan(300);
-		const { client_id } = (await registration.json()) as Json;
+		return ((await registration.json()) as Json).client_id;
+	}
 
+	async function startConsent(client_id?: string) {
+		client_id ??= await registerClient();
 		const { verifier, challenge } = await pkce();
 		const authorizeUrl = new URL(`${ORIGIN}/authorize`);
 		authorizeUrl.search = new URLSearchParams({
@@ -373,21 +391,154 @@ describe("end-to-end OAuth with the passphrase", () => {
 		return { client_id, verifier, handle: handle!, cookies: cookieHeader(consent) };
 	}
 
-	async function submit(handle: string, cookies: string, passphrase: string) {
-		return SELF.fetch(`${ORIGIN}/authorize`, {
+	function approveRequest(handle: string, cookies: string, passphrase: string) {
+		return new Request(`${ORIGIN}/authorize`, {
 			method: "POST",
 			redirect: "manual",
-			headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookies },
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+				Cookie: cookies,
+				Host: new URL(ORIGIN).host,
+				"CF-Connecting-IP": ip,
+			},
 			body: new URLSearchParams({ handle, decision: "approve", passphrase }).toString(),
 		});
 	}
 
-	it("refuses a wrong passphrase without burning the consent page", async () => {
+	async function submit(handle: string, cookies: string, passphrase: string) {
+		return SELF.fetch(approveRequest(handle, cookies, passphrase));
+	}
+
+	/** Same POST, but straight into the Worker with a modified environment. */
+	function submitWith(custom: Partial<Env>, handle: string, cookies: string, passphrase: string) {
+		return viaWorker(approveRequest(handle, cookies, passphrase), custom);
+	}
+
+	/** The real OAUTH_KV, except that the named methods throw for keys under `prefix`. */
+	function kvFailingOn(prefix: string, methods: ("get" | "put")[]): KVNamespace {
+		const real = env.OAUTH_KV as any;
+		const wrap = (method: "get" | "put") => (key: string, ...rest: unknown[]) => {
+			if (methods.includes(method) && key.startsWith(prefix)) return Promise.reject(new Error("KV unavailable"));
+			return real[method](key, ...rest);
+		};
+		return {
+			get: wrap("get"),
+			put: wrap("put"),
+			delete: (key: string) => real.delete(key),
+			list: (options?: unknown) => real.list(options),
+			getWithMetadata: (...args: unknown[]) => real.getWithMetadata(...args),
+		} as unknown as KVNamespace;
+	}
+
+	it("refuses a wrong passphrase and offers a fresh consent form to retry on", async () => {
 		const { handle, cookies } = await startConsent();
 		const wrong = await submit(handle, cookies, "not the passphrase");
 		expect(wrong.status).toBe(401);
-		const right = await submit(handle, cookies, "correct horse battery staple");
+		const html = await wrong.text();
+		expect(html).toContain("That passphrase didn");
+		const freshHandle = html.match(/name="handle" value="([^"]+)"/)?.[1];
+		expect(freshHandle).toBeTruthy();
+		expect(freshHandle).not.toBe(handle);
+
+		// The first handle was consumed when it was checked, before the passphrase was compared.
+		const reused = await submit(handle, cookies, "correct horse battery staple");
+		expect(reused.status).toBe(400);
+
+		const right = await submit(freshHandle!, cookieHeader(wrong), "correct horse battery staple");
 		expect(right.status).toBe(302);
+	});
+
+	it("answers a POST with no consent context the same way for a right and a wrong passphrase", async () => {
+		const bare = (passphrase: string) =>
+			SELF.fetch(`${ORIGIN}/authorize`, {
+				method: "POST",
+				redirect: "manual",
+				headers: { "Content-Type": "application/x-www-form-urlencoded", "CF-Connecting-IP": ip },
+				body: new URLSearchParams({ decision: "approve", passphrase }).toString(),
+			});
+		const right = await bare("correct horse battery staple");
+		const wrong = await bare("not the passphrase");
+		expect(right.status).toBe(400);
+		expect(wrong.status).toBe(right.status);
+		expect(await wrong.text()).toBe(await right.text());
+		expect(right.headers.get("Location")).toBeNull();
+	});
+
+	it("issues no token while the lock-out counter can't be read, even with the right passphrase", async () => {
+		const { handle, cookies } = await startConsent();
+		const kv = kvFailingOn("dexter:pass-fail:", ["get"]);
+		const response = await submitWith({ OAUTH_KV: kv }, handle, cookies, "correct horse battery staple");
+		expect(response.status).toBe(500);
+		expect(response.headers.get("Location")).toBeNull();
+		// The handle was never consumed: the same consent form still works once KV is back.
+		const retry = await submit(handle, cookies, "correct horse battery staple");
+		expect(retry.status).toBe(302);
+	});
+
+	it("refuses instead of forgiving a wrong passphrase when the failure can't be recorded", async () => {
+		const { handle, cookies } = await startConsent();
+		const kv = kvFailingOn("dexter:pass-fail:", ["put"]);
+		const response = await submitWith({ OAUTH_KV: kv }, handle, cookies, "not the passphrase");
+		expect(response.status).toBe(500);
+		expect(await response.text()).not.toContain('name="handle"');
+	});
+
+	it("locks an IP out after five wrong passphrases", async () => {
+		const client_id = await registerClient();
+		for (let i = 0; i < 5; i++) {
+			const { handle, cookies } = await startConsent(client_id);
+			expect((await submit(handle, cookies, `wrong ${i}`)).status).toBe(401);
+		}
+		const { handle, cookies } = await startConsent(client_id);
+		const locked = await submit(handle, cookies, "correct horse battery staple");
+		expect(locked.status).toBe(429);
+		expect(locked.headers.get("Retry-After")).toBe("900");
+	});
+
+	describe("per-IP rate limit", () => {
+		const denying = { limit: async () => ({ success: false }) } as unknown as RateLimit;
+		const broken = { limit: async () => { throw new Error("binding down"); } } as unknown as RateLimit;
+
+		function post(path: string, custom: Partial<Env>) {
+			const request = new Request(`${ORIGIN}${path}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip, Host: new URL(ORIGIN).host },
+				body: "{}",
+			});
+			return viaWorker(request, custom);
+		}
+
+		it("returns 429 with Retry-After on /authorize and /register once the limit is hit", async () => {
+			for (const path of ["/authorize", "/register"]) {
+				const response = await post(path, { AUTH_RL: denying });
+				expect(response.status, path).toBe(429);
+				expect(response.headers.get("Retry-After"), path).toBe("60");
+			}
+			expect((await post("/register", { AUTH_RL: denying })).headers.get("Content-Type")).toContain("application/json");
+		});
+
+		it("fails closed when the limiter itself fails", async () => {
+			expect((await post("/register", { AUTH_RL: broken })).status).toBe(429);
+			expect((await post("/authorize", { AUTH_RL: undefined })).status).toBe(429);
+		});
+
+		it("is wired to the real binding: the 11th registration in a minute is refused", async () => {
+			const register = () =>
+				SELF.fetch(`${ORIGIN}/register`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+					body: JSON.stringify({ client_name: "Burst", redirect_uris: [REDIRECT], token_endpoint_auth_method: "none" }),
+				});
+			const statuses: number[] = [];
+			for (let i = 0; i < 11; i++) statuses.push((await register()).status);
+			expect(statuses.slice(0, 10).every((s) => s < 300), statuses.join(",")).toBe(true);
+			expect(statuses[10], statuses.join(",")).toBe(429);
+		});
+
+		it("does not meter GET requests", async () => {
+			const response = await viaWorker(new Request(`${ORIGIN}/`, { headers: { Host: new URL(ORIGIN).host } }), { AUTH_RL: denying });
+			expect(response.status).toBe(200);
+		});
 	});
 
 	it("issues a token that opens /mcp", async () => {

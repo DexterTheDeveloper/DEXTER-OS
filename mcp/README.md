@@ -33,7 +33,7 @@ ChatGPT works the same way: Settings → Apps → Advanced settings → turn on 
 | Piece | Detail |
 |---|---|
 | MCP endpoint | `/mcp`, stateless, `createMcpHandler` from `agents/mcp/server` with `@modelcontextprotocol/server` v2. Serves 2026-07-28 clients and 2025-era clients (Alexa+) |
-| Sign-in | OAuth 2.1 via `@cloudflare/workers-oauth-provider` (dynamic registration and Client ID Metadata Documents). The consent page asks for `DEXTER_PASSPHRASE`; 5 wrong tries lock that IP out for 15 minutes, which only slows guessing. The passphrase's strength is the real gate |
+| Sign-in | OAuth 2.1 via `@cloudflare/workers-oauth-provider` (dynamic registration and Client ID Metadata Documents). The consent page asks for `DEXTER_PASSPHRASE`, and only after the consent handle and its cookie check out. Per IP: at most 10 sign-in or registration requests a minute (Workers rate limit `AUTH_RL`, checked before anything is written) and 5 wrong passphrases per 15 minutes (KV counter; if KV is unreachable the page refuses rather than skipping the check). Both only slow guessing. The passphrase's strength is the real gate |
 | Memory | Two Claude Managed Agents memory stores, created on first use: **DEXTER Memory** (read, propose, STATE.md) and **DEXTER Reference** (read only). Every change is versioned |
 | Log and reminders | D1 database `dexter`; tables are created on first use (`schema.sql` mirrors them) |
 | Reminder delivery | Cron every minute, push via ntfy. Each reminder is claimed before sending so it can't go out twice; 3 failures marks it failed |

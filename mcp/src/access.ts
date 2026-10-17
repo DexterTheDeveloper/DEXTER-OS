@@ -121,8 +121,12 @@ async function passphraseMatches(env: Env, attempt: string): Promise<boolean> {
 	return diff === 0;
 }
 
+function clientIp(request: Request): string {
+	return request.headers.get("CF-Connecting-IP") ?? "unknown";
+}
+
 function failureKey(request: Request): string {
-	return `dexter:pass-fail:${request.headers.get("CF-Connecting-IP") ?? "unknown"}`;
+	return `dexter:pass-fail:${clientIp(request)}`;
 }
 
 async function tooManyFailures(env: Env, request: Request): Promise<boolean> {
@@ -134,6 +138,38 @@ async function recordFailure(env: Env, request: Request): Promise<void> {
 	const key = failureKey(request);
 	const count = Number((await env.OAUTH_KV.get(key)) ?? "0") + 1;
 	await env.OAUTH_KV.put(key, String(count), { expirationTtl: FAILURE_WINDOW_SECONDS });
+}
+
+/**
+ * First layer on POST /authorize and POST /register: the AUTH_RL rate limit (wrangler.jsonc),
+ * keyed by client IP, checked before either endpoint writes to KV. Fails closed: a missing or
+ * failing limiter refuses the request rather than letting it through unmetered.
+ */
+export async function authRateLimit(env: Env, request: Request): Promise<Response | null> {
+	let success: boolean;
+	try {
+		({ success } = await env.AUTH_RL.limit({ key: clientIp(request) }));
+	} catch {
+		success = false;
+	}
+	if (success) return null;
+	const headers = new Headers({ "Retry-After": "60", "Cache-Control": "no-store" });
+	if (new URL(request.url).pathname === "/register") {
+		headers.set("Content-Type", "application/json");
+		return new Response(
+			JSON.stringify({ error: "temporarily_unavailable", error_description: "Too many requests. Try again in a minute." }),
+			{ status: 429, headers },
+		);
+	}
+	return page("Too many requests", `<div class="card"><p class="warn">Too many sign-in attempts from this network. Wait a minute and try again.</p></div>`, 429, headers);
+}
+
+function unavailable(): Response {
+	return page(
+		"Sign-in paused",
+		`<div class="card"><p class="warn">DEXTER can't reach its lock-out counter right now, so it isn't checking passphrases. Try again in a minute.</p></div>`,
+		500,
+	);
 }
 
 function page(title: string, body: string, status = 200, headers = new Headers()): Response {
@@ -157,7 +193,13 @@ button.primary{background:#38e1ff;color:#0a0e14;border-color:#38e1ff;font-weight
 	);
 }
 
-function consentPage(details: ConsentDescription, handle: string, headers: Headers, mode: AuthMode): Response {
+function consentPage(
+	details: ConsentDescription,
+	handle: string,
+	headers: Headers,
+	mode: AuthMode,
+	notice?: { text: string; status: number },
+): Response {
 	const name = escapeHtml(details.clientName);
 	const origin = details.clientDomain
 		? `Published by <strong>${escapeHtml(details.clientDomain)}</strong>.`
@@ -165,6 +207,7 @@ function consentPage(details: ConsentDescription, handle: string, headers: Heade
 	const loopback = details.redirectIsLoopback
 		? `<p class="warn">This sends access to an app on your computer. Continue only if you just started connecting from it.</p>`
 		: "";
+	const warning = notice ? `<p class="warn">${escapeHtml(notice.text)}</p>` : "";
 	const proof =
 		mode === "passphrase"
 			? `<label for="passphrase">DEXTER passphrase</label>
@@ -173,10 +216,10 @@ function consentPage(details: ConsentDescription, handle: string, headers: Heade
 	return page(
 		`Connect ${details.clientName} to DEXTER`,
 		`<div class="card"><p><strong>${name}</strong> wants to use DEXTER's memory, log and reminders.</p>
-<p>${origin} Access goes to <strong>${escapeHtml(details.redirectHost)}</strong>.</p>${loopback}
+<p>${origin} Access goes to <strong>${escapeHtml(details.redirectHost)}</strong>.</p>${loopback}${warning}
 <form method="post"><input type="hidden" name="handle" value="${escapeHtml(handle)}">${proof}
 <div class="row"><button name="decision" value="deny" formnovalidate>Deny</button><button class="primary" name="decision" value="approve">Allow</button></div></form></div>`,
-		200,
+		notice?.status ?? 200,
 		headers,
 	);
 }
@@ -348,19 +391,40 @@ export async function handleAuthRequest(request: Request, env: Env, _ctx: Execut
 				return redirectToAccess(env, request, approved.request, approved.headers);
 			}
 
-			// Passphrase mode. Check before consuming the handle, so a typo can go back and retry.
-			if (await tooManyFailures(env, request)) {
-				return page("Too many tries", `<div class="card"><p class="warn">Too many wrong passphrases. Wait 15 minutes and try again.</p></div>`, 429);
+			// Passphrase mode, in this order: the lock-out counter (fails closed), then the consent
+			// handle and its binding cookie, and only then the passphrase. A POST without a live
+			// consent transaction gets the same 400 whether the passphrase is right or wrong, so
+			// this page can't be used to test guesses outside an OAuth flow.
+			let locked: boolean;
+			try {
+				locked = await tooManyFailures(env, request);
+			} catch {
+				return unavailable();
 			}
-			if (!(await passphraseMatches(env, String(form.get("passphrase") ?? "")))) {
-				await recordFailure(env, request);
+			if (locked) {
 				return page(
-					"Wrong passphrase",
-					`<div class="card"><p class="warn">That passphrase didn't match.</p><p><a href="javascript:history.back()">Go back and try again</a></p></div>`,
-					401,
+					"Too many tries",
+					`<div class="card"><p class="warn">Too many wrong passphrases. Wait 15 minutes and try again.</p></div>`,
+					429,
+					new Headers({ "Retry-After": String(FAILURE_WINDOW_SECONDS) }),
 				);
 			}
 			const approved = await oauth.approveConsent(request, handle);
+			if (!(await passphraseMatches(env, String(form.get("passphrase") ?? "")))) {
+				try {
+					await recordFailure(env, request);
+				} catch {
+					return unavailable();
+				}
+				// The handle above was single-use. Start a fresh consent transaction so a typo can be
+				// retried on this page instead of from the app.
+				const retry = await oauth.beginConsent(approved.request);
+				for (const cookie of approved.headers.getSetCookie()) retry.headers.append("Set-Cookie", cookie);
+				return consentPage(await oauth.describeConsent(approved.request), retry.handle, retry.headers, "passphrase", {
+					text: "That passphrase didn't match. Try again.",
+					status: 401,
+				});
+			}
 			return issueToken(
 				env,
 				approved.request,
