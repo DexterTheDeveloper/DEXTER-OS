@@ -72,7 +72,7 @@
     background: rgba(5,5,8,0.72);
   }
   .main {
-    flex: 1; min-width: 0; min-height: 0;
+    flex: 1; min-width: 0; min-height: 0; position: relative;
     display: flex; flex-direction: column;
     padding: calc(var(--u) * 1.4) calc(var(--u) * 1.6) calc(var(--u) * 1.2);
   }
@@ -307,6 +307,17 @@
     font-size: calc(var(--u) * 2.4); font-weight: 600; color: var(--mid); letter-spacing: 0.05em;
   }
   .msg span { display: inline-block; padding: 0.25em 0.9em; background: rgba(5,5,8,0.92); border: 1px solid var(--border); }
+  .msg.wide { left: 0; }
+
+  /* loading: a thin line along the top of the calendar while the shown range is being fetched */
+  .loadbar { position: absolute; top: 0; left: 0; right: 0; height: 3px; z-index: 8; pointer-events: none; opacity: 0; transition: opacity .2s; overflow: hidden; }
+  .loadbar.on { opacity: 1; }
+  .loadbar::after {
+    content: ''; position: absolute; top: 0; bottom: 0; left: -30%; width: 30%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: loadbar 1.1s linear infinite;
+  }
+  @keyframes loadbar { from { left: -30%; } to { left: 100%; } }
 
   /* ── MONTH ── */
   .mgrid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-auto-rows: 1fr; gap: 2px; }
@@ -394,6 +405,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .face-border, .face-scan::after { animation: none; }
+    .loadbar::after { animation: none; left: 0; width: 100%; opacity: 0.5; }
     .drawer { transition: none; }
   }
 
@@ -512,6 +524,7 @@
   </aside>
 
   <section class="main">
+    <div class="loadbar" id="loadbar"></div>
     <div class="bar">
       <div class="tabs">
         <div class="tab on" id="tabDay" data-view="day">DAY</div>
@@ -549,6 +562,12 @@
 <script>
 (function () {
   'use strict';
+  // The calendar feed. DEXTER-OS serves /api/calendar; the Mac voice server's /wall sets "/wall/calendar".
+  // Contract: GET CAL_ENDPOINT?from=YYYY-MM-DD&to=YYYY-MM-DD (New York dates, `to` exclusive), header
+  // X-Dexter-Passphrase -> { generatedAt, tz, from, to, calendars:[{id,name,color}],
+  // events:[{id,cal,title,start,end,allDay,location,status,declined}] } for the events overlapping the range.
+  var CAL_ENDPOINT = '/api/calendar';
+  var CHAT_SRC = '/';                 // what the chat drawer iframes
   var REFRESH_MS = 5 * 60 * 1000;
   var DEFAULT_TZ = 'America/New_York';
   var SETTINGS_KEY = 'dexterCalSettings';
@@ -557,8 +576,10 @@
   var WD_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-  var data = null;        // last good /api/calendar body
-  var lastGood = null;    // Date of the last good fetch
+  var store = {};         // 'from|to' -> { from, to, events, gen, at }: every range loaded; per day the newest wins
+  var calendars = [];     // calendar list from the latest good response
+  var inflight = {};      // 'from|to' -> true while that range is being fetched
+  var lastGood = null;    // Date of the last good fetch (any range)
   var tz = DEFAULT_TZ;
   var todayKey = '';
   var selKey = '';        // the day DAY shows; the day-button row shows its week
@@ -577,7 +598,7 @@
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
   // ── settings: display only, this device only, never the kiosk's own settings ──
-  function defaults() { return { clock24: true, seconds: false, weekStart: 0, workShade: true, dayStart: 5, dayEnd: 23, hiddenCals: [] }; }
+  function defaults() { return { clock24: true, seconds: false, weekStart: 0, workShade: true, dayStart: 5, dayEnd: 23, hiddenCals: [], idleMin: 5 }; }
   function intIn(v, lo, hi) { return (typeof v === 'number' && v % 1 === 0 && v >= lo && v <= hi) ? v : null; }
   function loadSettings() {
     var s = defaults();
@@ -591,6 +612,7 @@
       var a = intIn(raw.dayStart, 0, 23), b = intIn(raw.dayEnd, 1, 24);
       if (a !== null && b !== null && a < b) { s.dayStart = a; s.dayEnd = b; }
       if (Array.isArray(raw.hiddenCals)) s.hiddenCals = raw.hiddenCals.filter(function (x) { return typeof x === 'string'; });
+      if (raw.idleMin === 0 || raw.idleMin === 5 || raw.idleMin === 15) s.idleMin = raw.idleMin;
     }
     return s;
   }
@@ -659,9 +681,7 @@
 
   // ── calendars ──
   function calOf(id) {
-    if (data && data.calendars) {
-      for (var i = 0; i < data.calendars.length; i++) if (data.calendars[i].id === id) return data.calendars[i];
-    }
+    for (var i = 0; i < calendars.length; i++) if (calendars[i].id === id) return calendars[i];
     return null;
   }
   function calColor(id) { var c = calOf(id); return (c && c.color) || '#00d4ff'; }
@@ -686,14 +706,26 @@
       ev._st = new Date(ev.start).getTime();
     }
   }
-  function inWindow(key) { return key >= addDays(todayKey, -1) && key <= addDays(todayKey, 13); }
+  function hasData() { return Object.keys(store).length > 0; }
+  // The loaded range that answers for `key`: of the ranges covering it, the one the server generated last
+  // (a range served from the server's 5-minute cache can arrive after a fresher one and must not win).
+  function rangeFor(key) {
+    var best = null, keys = Object.keys(store);
+    for (var i = 0; i < keys.length; i++) {
+      var r = store[keys[i]];
+      if (r.from <= key && key < r.to && (!best || r.gen > best.gen)) best = r;
+    }
+    return best;
+  }
+  function known(key) { return !!rangeFor(key); }
   // Entries visible on `key`: {ev, allDay} or {ev, s, e} with s/e in wall-clock minutes of that day
   // (h*60+mi, so a DST day still lines up with its hour labels). A timed event that crosses midnight
   // appears on both days.
   function entriesOn(key) {
     if (byDay[key]) return byDay[key];
     var out = [];
-    var evs = (data && data.events) || [];
+    var range = rangeFor(key);
+    var evs = (range && range.events) || [];
     for (var i = 0; i < evs.length; i++) {
       var ev = evs[i];
       if (!shown(ev)) continue;
@@ -760,6 +792,7 @@
     if (key !== todayKey) {            // midnight: today moves, the view follows
       todayKey = key; selKey = key; monthCursor = null;
       renderAll();
+      ensureRange();
       return;
     }
     var minute = key + ' ' + p.h + ':' + p.mi;
@@ -768,23 +801,44 @@
       placeNowLines(p);
       renderNext();
     }
+    if (S.idleMin && Date.now() - lastTouch >= S.idleMin * 60000) goHome();
+  }
+
+  // ── idle return: nothing touched on the calendar or inside the chat drawer for S.idleMin minutes ->
+  //    close the settings sheet, close the drawer (a conversation in progress keeps resetting the timer, so an
+  //    open drawer here has had no input for that long) and show DAY on today. ──
+  var lastTouch = Date.now();
+  function markTouch() { lastTouch = Date.now(); }
+  function goHome() {
+    if ($('sheet').className.indexOf('open') >= 0) closeSheet();
+    if ($('drawer').className.indexOf('open') >= 0) closeDrawer();
+    if (view !== 'day' || selKey !== todayKey) { view = 'day'; selKey = todayKey; monthCursor = null; renderAll(); ensureRange(); }
+  }
+  // Input inside the drawer (same origin) counts as a touch; re-attached whenever the iframe loads a page.
+  function hookDrawer() {
+    try {
+      var d = $('dexterFrame').contentDocument;
+      if (!d || d.dexterIdleHooked) return;
+      d.dexterIdleHooked = true;
+      ['pointerdown', 'touchstart', 'mousedown', 'keydown', 'input'].forEach(function (t) { d.addEventListener(t, markTouch, { capture: true, passive: true }); });
+    } catch (e) {}   // a cross-origin drawer cannot be watched: then only touches on the calendar count
   }
 
   function renderNext() {
     var box = $('next');
     clear(box);
     box.appendChild(el('div', 'next-label', 'NEXT UP'));
-    if (!data) { box.appendChild(el('div', 'next-none', 'waiting for calendar')); return; }
+    if (!known(todayKey)) { box.appendChild(el('div', 'next-none', 'waiting for calendar')); return; }
     var now = Date.now();
-    var tomorrow = addDays(todayKey, 1);
     var best = null;
-    var evs = data.events || [];
-    for (var i = 0; i < evs.length; i++) {
-      var ev = evs[i];
-      if (ev.allDay || ev.declined || !ev._s || !shown(ev)) continue;
-      if (ev._st <= now) continue;
-      if (ev._sk !== todayKey && ev._sk !== tomorrow) continue;
-      if (!best || ev._st < best._st) best = ev;
+    var days = [todayKey, addDays(todayKey, 1)];
+    for (var di = 0; di < days.length; di++) {
+      var list = entriesOn(days[di]);   // visible calendars only
+      for (var i = 0; i < list.length; i++) {
+        var ev = list[i].ev;
+        if (list[i].allDay || ev.declined || ev._st <= now || ev._sk !== days[di]) continue;
+        if (!best || ev._st < best._st) best = ev;
+      }
     }
     if (!best) { box.appendChild(el('div', 'next-none', 'Nothing else today')); return; }
     var isTomorrow = best._sk !== todayKey;
@@ -839,7 +893,7 @@
       b.setAttribute('data-key', key);
       b.appendChild(el('span', 'wd', WD[weekdayOf(key)]));
       b.appendChild(el('span', 'dn', String(parseKey(key).d)));
-      if (data && inWindow(key) && entriesOn(key).length) b.appendChild(el('span', 'cnt'));
+      if (known(key) && entriesOn(key).length) b.appendChild(el('span', 'cnt'));
       b.addEventListener('click', onDayButton);
       box.appendChild(b);
     }
@@ -848,8 +902,8 @@
     box.appendChild(next);
   }
   function onDayButton(e) { showDay(e.currentTarget.getAttribute('data-key')); }
-  function showDay(key) { selKey = key; view = 'day'; renderAll(); }
-  function stepWeek(n) { selKey = addDays(selKey, 7 * n); renderAll(); }
+  function showDay(key) { selKey = key; view = 'day'; renderAll(); ensureRange(); }
+  function stepWeek(n) { selKey = addDays(selKey, 7 * n); renderAll(); ensureRange(); }
 
   // ── time grid (DAY = one column, WEEK = seven) ──
   function pct(min) { return ((min - S.dayStart * 60) / ((S.dayEnd - S.dayStart) * 60) * 100) + '%'; }
@@ -896,11 +950,11 @@
     }
     for (var i = 0; i < keys.length; i++) {
       var key = keys[i];
-      var known = !!data && inWindow(key);
-      var col = el('div', 'tl-col' + (S.workShade && isWork(key) ? ' work' : '') + (key === todayKey ? ' today' : '') + (data && !known ? ' out' : ''));
+      var kn = known(key);
+      var col = el('div', 'tl-col' + (S.workShade && isWork(key) ? ' work' : '') + (key === todayKey ? ' today' : '') + (hasData() && !kn ? ' out' : ''));
       col.setAttribute('data-key', key);
       if (week) col.addEventListener('click', onDayButton);
-      if (known) {
+      if (kn) {
         var blocks = splitDay(key).blocks;
         for (var j = 0; j < blocks.length; j++) col.appendChild(blockFor(blocks[j], week));
       }
@@ -940,12 +994,13 @@
       lines[i].style.top = pct(min);
     }
   }
-  function message(text) { var m = el('div', 'msg'); m.appendChild(el('span', '', text)); return m; }
+  function message(text, wide, unk) { var m = el('div', 'msg' + (wide ? ' wide' : '') + (unk ? ' unk' : '')); m.appendChild(el('span', '', text)); return m; }
+  function unknownText() { return viewLoading() ? 'loading…' : 'not loaded'; }
 
   function renderDayView(v) {
     var key = selKey;
-    var known = !!data && inWindow(key);
-    var split = known ? splitDay(key) : { chips: [], blocks: [] };
+    var kn = known(key);
+    var split = kn ? splitDay(key) : { chips: [], blocks: [] };
     if (split.chips.length) {
       var chips = el('div', 'chips');
       for (var i = 0; i < split.chips.length; i++) chips.appendChild(chipFor(split.chips[i], true));
@@ -953,8 +1008,8 @@
     }
     var tl = buildTimeline([key], false);
     v.appendChild(tl);
-    if (!data) tl.appendChild(message('waiting for calendar'));
-    else if (!known) tl.appendChild(message('outside the two-week calendar window'));
+    if (!hasData()) tl.appendChild(message('waiting for calendar'));
+    else if (!kn) tl.appendChild(message(unknownText(), false, true));
     else if (!split.chips.length && !split.blocks.length) tl.appendChild(message('Nothing scheduled'));
   }
 
@@ -968,7 +1023,7 @@
     var cells = el('div', 'cells');
     for (var k = 0; k < 7; k++) {
       var cell = el('div', 'cell');
-      if (data && inWindow(keys[k])) {
+      if (known(keys[k])) {
         var chips = splitDay(keys[k]).chips;
         for (var c = 0; c < chips.length && c < 2; c++) { cell.appendChild(chipFor(chips[c], !chips[c].allDay)); any = true; }
         if (chips.length > 2) cell.appendChild(el('div', 'more', '+' + (chips.length - 2)));
@@ -980,11 +1035,11 @@
     if (any) v.appendChild(row);
     var tl = buildTimeline(keys, true);
     v.appendChild(tl);
-    if (!data) tl.appendChild(message('waiting for calendar'));
+    if (!hasData()) tl.appendChild(message('waiting for calendar'));
     else {
-      var known = 0;
-      for (var j = 0; j < 7; j++) if (inWindow(keys[j])) known++;
-      if (!known) tl.appendChild(message('outside the two-week calendar window'));
+      var n = 0;
+      for (var j = 0; j < 7; j++) if (known(keys[j])) n++;
+      if (!n) tl.appendChild(message(unknownText(), false, true));
     }
   }
 
@@ -1002,14 +1057,16 @@
     var days = new Date(Date.UTC(y, m, 0)).getUTCDate();
     var last = y + '-' + pad2(m) + '-' + pad2(days);
     var end = addDays(weekStartOf(last), 6);
+    var anyKnown = false;
     for (var key = start; key <= end; key = addDays(key, 1)) {
       var p = parseKey(key);
-      var known = !!data && inWindow(key);
+      var kn = known(key);
+      if (kn) anyKnown = true;
       var cell = el('div', 'mday' + (p.m !== m ? ' other' : '') + (S.workShade && isWork(key) ? ' work' : '') +
-        (key === todayKey ? ' today' : '') + (key === selKey ? ' sel' : '') + (data && !known ? ' out' : ''));
+        (key === todayKey ? ' today' : '') + (key === selKey ? ' sel' : '') + (hasData() && !kn ? ' out' : ''));
       cell.setAttribute('data-key', key);
       cell.appendChild(el('div', 'n', String(p.d)));
-      if (known) {
+      if (kn) {
         var list = entriesOn(key);
         if (list.length) {
           var dots = el('div', 'dots');
@@ -1026,16 +1083,22 @@
       grid.appendChild(cell);
     }
     v.appendChild(grid);
+    if (!hasData()) v.appendChild(message('waiting for calendar', true));
+    else if (!anyKnown) v.appendChild(message(unknownText(), true, true));
   }
 
+  var lastViewSig = '';
   function renderView() {
     var v = $('view');
+    var sig = view + '|' + (view === 'month' ? monthCursor.y + '-' + monthCursor.m : selKey);
+    var keep = sig === lastViewSig ? v.scrollTop : -1;   // same view re-rendered (a refresh): stay where the reader is
+    lastViewSig = sig;
     clear(v);
     if (view === 'day') renderDayView(v);
     else if (view === 'week') renderWeekView(v);
     else renderMonthView(v);
     placeNowLines(partsIn(new Date(), tz));
-    scrollToWork(v);
+    if (keep >= 0) v.scrollTop = keep; else scrollToWork(v);
   }
   // Phone only (the wall fits the whole range): bring the useful hours into view.
   function scrollToWork(v) {
@@ -1043,7 +1106,7 @@
     var target = -1;
     if (selKey === todayKey) { var p = partsIn(new Date(), tz); target = p.h * 60 + p.mi - 60; }
     else if (view === 'day') {
-      var b = data && inWindow(selKey) ? splitDay(selKey).blocks : [];
+      var b = known(selKey) ? splitDay(selKey).blocks : [];
       if (b.length) target = b[0].vs - 30;
     }
     if (target < 0) { v.scrollTop = 0; return; }
@@ -1061,6 +1124,7 @@
     if (view !== 'month') renderDays();
     renderView();
     renderNext();
+    renderLoading();
   }
 
   // ── navigation ──
@@ -1068,18 +1132,21 @@
     view = v;
     if (v === 'month') { var p = parseKey(selKey); monthCursor = { y: p.y, m: p.m }; }
     renderAll();
+    ensureRange();
   }
   function stepMonth(n) {
     var m = monthCursor.m + n, y = monthCursor.y;
     if (m < 1) { m = 12; y--; } else if (m > 12) { m = 1; y++; }
     monthCursor = { y: y, m: m };
     renderAll();
+    ensureRange();
   }
   function goToday() {
     selKey = todayKey;
     var p = parseKey(todayKey);
     monthCursor = { y: p.y, m: p.m };
     renderAll();
+    ensureRange();
   }
 
   // ── settings sheet ──
@@ -1113,7 +1180,7 @@
     row.appendChild(st);
     return row;
   }
-  function changed() { saveSettings(); lastMinute = ''; renderClock(); renderAll(); renderStatus(); renderSheet(); }
+  function changed() { saveSettings(); lastMinute = ''; renderClock(); renderAll(); renderStatus(); renderSheet(); ensureRange(); }
   function renderSheet() {
     var body = $('sheetBody');
     var top = body.scrollTop;
@@ -1135,8 +1202,11 @@
     body.appendChild(stepper('Ends at', 'setEnd', fmtHour(S.dayEnd), function (n) {
       var v = S.dayEnd + n; if (v > 24 || v <= S.dayStart) return; S.dayEnd = v; changed();
     }));
+    body.appendChild(el('div', 'sec-label', 'WHEN LEFT ALONE'));
+    var r5 = seg('Return to today after', [['5 MIN', 5], ['15 MIN', 15], ['NEVER', 0]], S.idleMin, function (v) { S.idleMin = v; changed(); });
+    r5.id = 'setIdle'; body.appendChild(r5);
     body.appendChild(el('div', 'sec-label', 'CALENDARS SHOWN'));
-    var cals = (data && data.calendars) || [];
+    var cals = calendars;
     if (!cals.length) body.appendChild(el('div', 'note', 'Calendars appear here once the calendar has loaded.'));
     cals.forEach(function (c) {
       var on = S.hiddenCals.indexOf(c.id) < 0;
@@ -1182,49 +1252,91 @@
     return !!entered;
   }
 
-  // ── fetch ──
-  var loading = false;
-  function load(retried) {
-    if (loading && !retried) return;
-    loading = true;
-    return fetch('/api/calendar', { headers: { 'X-Dexter-Passphrase': encodeURIComponent(storedPass()) }, cache: 'no-store' })
+  // ── fetch: DAY/WEEK need the shown week ±7 days, MONTH its whole grid; every range loaded is kept ──
+  function rangeKey(r) { return r.from + '|' + r.to; }
+  function weekRange(key) { var ws = weekStartOf(key); return { from: addDays(ws, -7), to: addDays(ws, 14) }; }   // to is exclusive
+  function viewRange() {
+    if (view === 'month') { var s = weekStartOf(monthCursor.y + '-' + pad2(monthCursor.m) + '-01'); return { from: s, to: addDays(s, 42) }; }
+    return weekRange(selKey);
+  }
+  function viewLoading() { return !!inflight[rangeKey(viewRange())]; }
+  function renderLoading() {
+    var on = viewLoading();
+    $('loadbar').className = 'loadbar' + (on ? ' on' : '');
+    var msgs = document.querySelectorAll('.msg.unk span');   // a range starting or finishing updates its message in place
+    for (var i = 0; i < msgs.length; i++) msgs[i].textContent = on ? 'loading…' : 'not loaded';
+  }
+  function fresh(r) { var e = store[rangeKey(r)]; return !!e && Date.now() - e.at < REFRESH_MS; }
+  // After navigation: fetch what the view needs unless it is fresh or already on its way.
+  function ensureRange() { var r = viewRange(); if (!fresh(r)) load(r); else renderLoading(); }
+  // The 5-minute refresh: the view's range, plus this week's (quietly) when the view is elsewhere, so NEXT UP
+  // and today stay current while the wall shows another month.
+  function refresh() {
+    var r = viewRange();
+    load(r);
+    if (!(r.from <= todayKey && addDays(todayKey, 1) < r.to)) load(weekRange(todayKey), false, true);
+  }
+  function pruneStore() {
+    var keys = Object.keys(store);
+    while (keys.length > 12) {
+      var oldest = keys[0];
+      for (var i = 1; i < keys.length; i++) if (store[keys[i]].at < store[oldest].at) oldest = keys[i];
+      delete store[oldest];
+      keys = Object.keys(store);
+    }
+  }
+  function load(range, retried, quiet) {
+    var k = rangeKey(range);
+    if (inflight[k] && !retried) return;
+    inflight[k] = true;
+    renderLoading();
+    var sent = storedPass();
+    var done = function () { inflight[k] = false; renderLoading(); };
+    return fetch(CAL_ENDPOINT + '?from=' + range.from + '&to=' + range.to, { headers: { 'X-Dexter-Passphrase': encodeURIComponent(sent) }, cache: 'no-store' })
       .then(function (r) {
         if (r.status === 401) {
+          if (!retried && storedPass() !== sent) return load(range, true, quiet);   // a newer passphrase was typed meanwhile
+          if (quiet) { done(); return; }
           try { localStorage.removeItem('dexterPass'); } catch (e) {}
-          if (!retried && askPass()) return load(true);
+          if (!retried && askPass()) return load(range, true, quiet);
+          done();
           setStatus('pass', '', 'warn');
-          loading = false;
           return;
         }
         return r.json().then(function (d) {
-          loading = false;
+          done();
           if (!r.ok) {
-            var msg = d && d.error ? d.error : 'calendar unavailable';
-            setStatus('err', msg, r.status === 503 ? 'warn' : 'bad');
+            if (!quiet) setStatus('err', d && d.error ? d.error : 'calendar unavailable', r.status === 503 ? 'warn' : 'bad');
+            renderAll();   // 'loading…' becomes 'not loaded'
             return;
           }
           tz = d.tz || DEFAULT_TZ;
           partFmt = {};
           prepData(d);
-          data = d;
+          store[k] = { from: d.from || range.from, to: d.to || range.to, events: d.events || [], gen: Date.parse(d.generatedAt) || Date.now(), at: Date.now() };
+          pruneStore();
+          calendars = d.calendars || [];
           lastGood = new Date();
           var key = dayKey(lastGood);
-          if (key !== todayKey) { todayKey = key; selKey = key; monthCursor = null; }
+          var moved = key !== todayKey;
+          if (moved) { todayKey = key; selKey = key; monthCursor = null; }
           renderAll();
           if ($('sheet').className.indexOf('open') >= 0) renderSheet();
-          setStatus('ok');
+          if (!quiet) setStatus('ok');
+          if (moved) ensureRange();
         });
       })
       .catch(function () {
-        loading = false;
-        setStatus('offline', '', 'warn');
+        done();
+        if (!quiet) setStatus('offline', '', 'warn');
+        renderAll();
       });
   }
 
   // ── drawer ──
   function openDrawer() {
     var f = $('dexterFrame');
-    if (!f.getAttribute('src')) f.setAttribute('src', '/');
+    if (!f.getAttribute('src')) f.setAttribute('src', CHAT_SRC);
     $('drawer').className = 'drawer open';
     $('scrim').className = 'scrim open';
   }
@@ -1311,6 +1423,8 @@
   }
 
   // ── wire up ──
+  ['pointerdown', 'touchstart', 'mousedown', 'keydown', 'wheel'].forEach(function (t) { document.addEventListener(t, markTouch, { capture: true, passive: true }); });
+  $('dexterFrame').addEventListener('load', hookDrawer);
   $('face').addEventListener('click', openDrawer);
   $('drawerClose').addEventListener('click', closeDrawer);
   $('scrim').addEventListener('click', closeDrawer);
@@ -1323,7 +1437,7 @@
   $('monthPrev').addEventListener('click', function () { stepMonth(-1); });
   $('monthNext').addEventListener('click', function () { stepMonth(1); });
   $('todayBtn').addEventListener('click', goToday);
-  $('status').addEventListener('click', function () { if (!storedPass() && askPass()) load(); });
+  $('status').addEventListener('click', function () { if (!storedPass() && askPass()) load(viewRange()); });
 
   faceInit();
   todayKey = dayKey(new Date());
@@ -1331,11 +1445,11 @@
   renderClock();
   renderAll();
   if (!storedPass()) askPass();
-  load();
+  load(viewRange());
   setInterval(renderClock, 1000);
-  setInterval(load, REFRESH_MS);
+  setInterval(refresh, REFRESH_MS);
   document.addEventListener('visibilitychange', function () {
-    if (!document.hidden && lastGood && Date.now() - lastGood.getTime() > REFRESH_MS) load();
+    if (!document.hidden && lastGood && Date.now() - lastGood.getTime() > REFRESH_MS) refresh();
   });
 })();
 </script>
