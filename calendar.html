@@ -8,28 +8,35 @@
 <meta name="theme-color" content="#050508">
 <link rel="apple-touch-icon" href="avatar.png">
 <title>DEXTER — Calendar</title>
-<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
 <style>
-  /* Wall calendar for DEXTER-OS. Served at /calendar (Pages clean URLs). Data: GET /api/calendar.
-     Plain ES2018 and no keyboard: it runs in the DF-18T's Android 14 WebView, landscape, read from
-     across a room, and on the phone in portrait. Colors and fonts follow index.html. */
+  /* Wall calendar for DEXTER-OS, v2. Served at /calendar (Pages clean URLs). Data: GET /api/calendar.
+     Plain ES2018 and no keyboard: it runs in the DF-18T's Android 14 WebView (1920x1280 landscape, read
+     from across a room) and on the phone in portrait. Colors and fonts follow index.html. The Google Fonts
+     stylesheet is linked AFTER the script on purpose: a stylesheet in <head> holds the script back, and a
+     stalled fonts request once left a page dead on a weak connection. */
   :root {
     --bg: #050508;
     --panel: #0d0d14;
     --border: #151525;
+    --line: rgba(120,140,170,0.13);
     --accent: #00d4ff;
     --accent2: #39ff14;
     --accent3: #ff4400;
+    --now: #ff2d55;
     --gold: #ffaa00;
     --text: #c8d6e5;
     --dim: #3a4558;
+    --mid: #6b7a90;
     --bright: #edf2f7;
+    --work: rgba(0,212,255,0.045);
     --mono: 'Share Tech Mono', monospace;
     --display: 'Orbitron', sans-serif;
     --body: 'Rajdhani', sans-serif;
     --safe-top: env(safe-area-inset-top, 0px);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
-    --unit: 1vw;   /* landscape sizes scale with the width */
+    --u: 1vw;                         /* landscape sizes scale with the width: 19.2px on the wall */
+    --gut: calc(var(--u) * 4.6);      /* hour-label gutter; the ‹ button sits in the same width */
+    --nav: calc(var(--u) * 3.0);      /* › button width; WEEK keeps a spacer this wide so columns line up */
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -48,192 +55,319 @@
     background-size: 40px 40px;
     pointer-events: none; z-index: 0;
   }
+  .tap { cursor: pointer; }
 
-  /* ── LAYOUT: landscape = clock column left, agenda right, 7-day strip under the agenda ── */
-  .wall {
+  /* ── LAYOUT: DEXTER column left (30%), calendar right (70%) ── */
+  .app {
     position: relative; z-index: 1;
-    display: grid;
-    grid-template-columns: 34% 1fr;
-    grid-template-rows: 1fr auto;
+    display: flex;
     height: 100%; height: -webkit-fill-available;
     padding-top: var(--safe-top); padding-bottom: var(--safe-bottom);
   }
-
-  .now {
-    grid-row: 1 / 3;
+  .side {
+    flex: 0 0 30%; min-width: 0;
     display: flex; flex-direction: column;
-    padding: calc(var(--unit) * 2.2) calc(var(--unit) * 2);
+    padding: calc(var(--u) * 2.0) calc(var(--u) * 2.0) calc(var(--u) * 1.6);
     border-right: 1px solid var(--border);
-    background: rgba(5,5,8,0.7);
-    min-width: 0;
+    background: rgba(5,5,8,0.72);
   }
-  .logo {
-    font-family: var(--display); font-weight: 900;
-    font-size: calc(var(--unit) * 1.0); letter-spacing: 0.5em;
-    color: var(--accent); text-shadow: 0 0 14px rgba(0,212,255,0.5);
+  .main {
+    flex: 1; min-width: 0; min-height: 0;
+    display: flex; flex-direction: column;
+    padding: calc(var(--u) * 1.4) calc(var(--u) * 1.6) calc(var(--u) * 1.2);
   }
+
+  /* ── FACE (same loops and fallback chain as index.html) ── */
+  .face-zone {
+    position: relative; align-self: center;
+    display: flex; flex-direction: column; align-items: center;
+    cursor: pointer;
+  }
+  .face-amb {
+    position: absolute; top: -12%; left: -12%; width: 124%; padding-top: 124%;
+    border-radius: 50%; pointer-events: none;
+    background: radial-gradient(circle, rgba(0,212,255,0.10) 0%, transparent 68%);
+  }
+  .face { position: relative; width: calc(var(--u) * 13.5); height: calc(var(--u) * 13.5); }
+  .face-border {
+    position: absolute; top: -3px; right: -3px; bottom: -3px; left: -3px;
+    clip-path: polygon(14% 0%, 86% 0%, 100% 14%, 100% 86%, 86% 100%, 14% 100%, 0% 86%, 0% 14%);
+    background: linear-gradient(135deg, var(--accent), var(--accent2), var(--gold), var(--accent3));
+    opacity: 0.6;
+    animation: border-hue 4s linear infinite;
+  }
+  @keyframes border-hue { 0% { filter: hue-rotate(0deg); } 100% { filter: hue-rotate(360deg); } }
+  .face-img-wrap {
+    position: relative; width: 100%; height: 100%; overflow: hidden; background: #000;
+    clip-path: polygon(14% 0%, 86% 0%, 100% 14%, 100% 86%, 86% 100%, 14% 100%, 0% 86%, 0% 14%);
+  }
+  .face-img-wrap img, .face-img-wrap video {
+    display: block; width: 100%; height: 100%; object-fit: cover;
+    filter: brightness(0.92) saturate(1.2);
+  }
+  /* The <video> shows only once body.face-mode-video is set by faceInit(); until then (and in the webp /
+     static fallbacks) the <img> shows, so there is never an empty box. */
+  .face-video { display: none !important; }
+  body.face-mode-video .face-video { display: block !important; }
+  body.face-mode-video .face-img { display: none !important; }
+  .face-scan { position: absolute; top: 0; right: 0; bottom: 0; left: 0; pointer-events: none; overflow: hidden; }
+  .face-scan::after {
+    content: ''; position: absolute; left: 0; right: 0; height: 2px; top: -2px;
+    background: linear-gradient(90deg, transparent, rgba(0,212,255,0.5), transparent);
+    animation: ascan 3s linear infinite;
+  }
+  @keyframes ascan { from { top: -2px; } to { top: 100%; } }
+  .face-cap {
+    margin-top: calc(var(--u) * 0.9);
+    font-family: var(--mono); font-size: calc(var(--u) * 0.95); letter-spacing: 0.35em;
+    color: var(--accent); text-shadow: 0 0 10px rgba(0,212,255,0.5);
+    text-transform: uppercase; white-space: nowrap;
+  }
+  .face-zone:active .face { transform: scale(0.97); }
+
+  /* ── CLOCK ── */
+  .time { margin-top: calc(var(--u) * 1.6); min-width: 0; }
   .clock {
-    margin-top: calc(var(--unit) * 1.6);
     font-family: var(--display); font-weight: 700;
-    font-size: calc(var(--unit) * 9.5); line-height: 1;
+    font-size: calc(var(--u) * 7.4); line-height: 1;
     letter-spacing: -0.02em; color: var(--bright);
     text-shadow: 0 0 30px rgba(0,212,255,0.25);
     white-space: nowrap;
   }
-  .clock .ampm {
-    font-family: var(--mono); font-size: calc(var(--unit) * 2.2);
-    letter-spacing: 0.1em; color: var(--accent); margin-left: 0.25em; vertical-align: top;
+  .clock .sub {
+    font-family: var(--mono); font-size: calc(var(--u) * 2.0); font-weight: 400;
+    letter-spacing: 0.08em; color: var(--accent); margin-left: 0.3em; vertical-align: top;
   }
   .weekday {
-    margin-top: calc(var(--unit) * 1.4);
-    font-size: calc(var(--unit) * 3.2); font-weight: 700; line-height: 1.1; color: var(--bright);
+    margin-top: calc(var(--u) * 1.0);
+    font-size: calc(var(--u) * 2.7); font-weight: 700; line-height: 1.1; color: var(--bright);
     text-transform: uppercase; letter-spacing: 0.04em;
   }
-  .date {
-    margin-top: calc(var(--unit) * 0.4);
-    font-size: calc(var(--unit) * 2.4); font-weight: 400; color: var(--text);
+  .date { margin-top: calc(var(--u) * 0.2); font-size: calc(var(--u) * 2.0); color: var(--text); }
+
+  /* ── NEXT UP ── */
+  .next {
+    margin-top: calc(var(--u) * 1.8);
+    padding: calc(var(--u) * 1.1) calc(var(--u) * 1.2);
+    background: rgba(13,13,20,0.92);
+    border: 1px solid var(--border); border-left: calc(var(--u) * 0.3) solid var(--accent);
+    min-width: 0;
   }
+  .next-label { font-family: var(--display); font-weight: 900; font-size: calc(var(--u) * 0.95); letter-spacing: 0.3em; color: var(--accent); }
+  .next-none { margin-top: calc(var(--u) * 0.5); font-size: calc(var(--u) * 1.7); font-weight: 600; color: var(--mid); }
+  .next-title { margin-top: calc(var(--u) * 0.5); font-size: calc(var(--u) * 2.0); font-weight: 700; line-height: 1.15; color: var(--bright); overflow-wrap: anywhere; }
+  .next-time { margin-top: calc(var(--u) * 0.35); font-family: var(--mono); font-size: calc(var(--u) * 1.35); color: var(--text); }
+  .next-time .tag { color: var(--gold); margin-right: 0.6em; letter-spacing: 0.15em; }
+  .next-in { margin-top: calc(var(--u) * 0.3); font-family: var(--mono); font-size: calc(var(--u) * 1.35); color: var(--accent2); letter-spacing: 0.06em; }
+
+  /* ── STATUS + GEAR ── */
+  .side-foot { margin-top: auto; display: flex; align-items: center; gap: calc(var(--u) * 1.0); padding-top: calc(var(--u) * 1); }
+  .gear {
+    flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
+    width: calc(var(--u) * 3.3); height: calc(var(--u) * 3.3);
+    border: 1px solid rgba(0,212,255,0.3); border-radius: 2px; background: rgba(0,212,255,0.05);
+    color: var(--accent); cursor: pointer;
+  }
+  .gear svg { width: 58%; height: 58%; fill: currentColor; }
+  .gear:active { background: rgba(0,212,255,0.2); }
   .status {
-    margin-top: auto; padding-top: calc(var(--unit) * 1);
-    font-family: var(--mono); font-size: calc(var(--unit) * 1.0);
-    letter-spacing: 0.12em; color: var(--dim);
+    font-family: var(--mono); font-size: calc(var(--u) * 0.95);
+    letter-spacing: 0.12em; color: var(--mid); min-width: 0; overflow-wrap: anywhere;
   }
   .status.warn { color: var(--gold); }
   .status.bad { color: var(--accent3); }
-  .buttons { display: flex; gap: calc(var(--unit) * 0.8); margin-top: calc(var(--unit) * 1.2); }
-  .btn {
-    display: inline-block;
+
+  /* ── BAR: tabs, heading, navigation ── */
+  .bar { display: flex; align-items: center; gap: calc(var(--u) * 1.0); flex-shrink: 0; min-width: 0; }
+  .tabs { display: flex; flex-shrink: 0; border: 1px solid rgba(0,212,255,0.35); border-radius: 2px; }
+  .tab {
     font-family: var(--display); font-weight: 700;
-    font-size: calc(var(--unit) * 1.15); letter-spacing: 0.25em;
+    font-size: calc(var(--u) * 1.05); letter-spacing: 0.25em;
+    padding: calc(var(--u) * 0.95) calc(var(--u) * 1.7);
+    color: var(--accent); cursor: pointer;
+    border-right: 1px solid rgba(0,212,255,0.35);
+  }
+  .tab:last-child { border-right: 0; }
+  .tab.on { background: var(--accent); color: #050508; box-shadow: 0 0 24px rgba(0,212,255,0.35); }
+  .head { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 0.6em; overflow: hidden; white-space: nowrap; }
+  .head-label { font-family: var(--display); font-weight: 900; font-size: calc(var(--u) * 1.5); letter-spacing: 0.22em; color: var(--accent); text-shadow: 0 0 14px rgba(0,212,255,0.4); }
+  .head-date { font-size: calc(var(--u) * 1.5); font-weight: 600; color: var(--text); letter-spacing: 0.04em; overflow: hidden; text-overflow: ellipsis; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    font-family: var(--display); font-weight: 700;
+    font-size: calc(var(--u) * 1.0); letter-spacing: 0.2em;
     color: var(--accent); background: rgba(0,212,255,0.06);
     border: 1px solid rgba(0,212,255,0.35); border-radius: 2px;
-    padding: calc(var(--unit) * 1.0) calc(var(--unit) * 1.6);
+    padding: calc(var(--u) * 0.95) calc(var(--u) * 1.4);
     cursor: pointer; text-align: center;
   }
   .btn:active { background: rgba(0,212,255,0.2); }
-  .btn.primary { color: #050508; background: var(--accent); border-color: var(--accent); box-shadow: 0 0 24px rgba(0,212,255,0.35); }
+  .btn.arrow { font-family: var(--body); font-size: calc(var(--u) * 1.8); line-height: 1; letter-spacing: 0; padding: calc(var(--u) * 0.45) calc(var(--u) * 1.1); }
+  .btn.gold { color: var(--gold); border-color: rgba(255,170,0,0.45); background: rgba(255,170,0,0.06); }
+  .hide { display: none !important; }
 
-  /* ── AGENDA ── */
-  .agenda {
-    grid-column: 2; grid-row: 1;
-    display: flex; flex-direction: column; min-height: 0; min-width: 0;
-    padding: calc(var(--unit) * 2) calc(var(--unit) * 2.4) 0;
+  /* ── DAY BUTTONS (one week) ── */
+  .days {
+    flex-shrink: 0;
+    display: grid; grid-template-columns: var(--gut) repeat(7, minmax(0, 1fr)) var(--nav);
+    margin-top: calc(var(--u) * 1.0);
+    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
   }
-  .agenda-head {
-    display: flex; align-items: baseline; gap: calc(var(--unit) * 1.2);
-    padding-bottom: calc(var(--unit) * 0.8);
-    border-bottom: 1px solid var(--border);
-    position: relative; flex-shrink: 0;
+  .dnav {
+    display: flex; align-items: center; justify-content: center;
+    font-size: calc(var(--u) * 2.2); color: var(--accent); cursor: pointer;
   }
-  .agenda-head::after {
-    content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 1px;
-    background: linear-gradient(90deg, var(--accent), var(--accent2), transparent); opacity: 0.45;
+  .dnav:active { background: rgba(0,212,255,0.15); }
+  .dbtn {
+    display: flex; align-items: baseline; justify-content: center; gap: 0.45em;
+    padding: calc(var(--u) * 0.7) 0 calc(var(--u) * 0.6);
+    cursor: pointer; min-width: 0; position: relative;
+    border-left: 1px solid var(--border);
   }
-  .agenda-label {
-    font-family: var(--display); font-weight: 900;
-    font-size: calc(var(--unit) * 2.0); letter-spacing: 0.3em; color: var(--accent);
-    text-shadow: 0 0 14px rgba(0,212,255,0.4);
-  }
-  .agenda-date { font-size: calc(var(--unit) * 1.6); color: var(--text); font-weight: 600; letter-spacing: 0.05em; }
-  .agenda-back {
-    margin-left: auto;
-    font-family: var(--mono); font-size: calc(var(--unit) * 1.0); letter-spacing: 0.15em;
-    color: var(--gold); cursor: pointer; display: none;
-  }
-  .agenda.away .agenda-back { display: inline; }
-  .agenda-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: calc(var(--unit) * 1.0) 0 calc(var(--unit) * 1); }
-  .agenda-list::-webkit-scrollbar, .strip::-webkit-scrollbar { display: none; }
-  .empty {
-    font-size: calc(var(--unit) * 2.6); color: var(--dim); font-weight: 600;
-    padding: calc(var(--unit) * 3) 0; letter-spacing: 0.05em;
-  }
-  .ev {
-    display: flex; align-items: flex-start; gap: calc(var(--unit) * 1.4);
-    padding: calc(var(--unit) * 0.7) calc(var(--unit) * 1.2);
-    margin-bottom: calc(var(--unit) * 0.45);
-    border-left: calc(var(--unit) * 0.35) solid var(--accent);
-    background: rgba(13,13,20,0.9);
-    border-top: 1px solid var(--border); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
-  }
-  .ev-time {
-    flex: 0 0 calc(var(--unit) * 15);
-    font-family: var(--mono); font-size: calc(var(--unit) * 1.9); line-height: 1.25;
-    color: var(--bright); letter-spacing: 0.02em; white-space: nowrap;
-  }
-  .ev.allday .ev-time { color: var(--accent2); letter-spacing: 0.15em; }
-  .ev-main { min-width: 0; flex: 1; }
-  .ev-title { font-size: calc(var(--unit) * 2.4); font-weight: 700; line-height: 1.15; color: var(--bright); overflow-wrap: anywhere; }
-  .ev-loc { font-size: calc(var(--unit) * 1.4); color: var(--text); opacity: 0.8; margin-top: 0.15em; overflow-wrap: anywhere; }
-  .ev-cal { font-family: var(--mono); font-size: calc(var(--unit) * 0.9); letter-spacing: 0.15em; color: var(--dim); margin-top: 0.3em; }
-  .ev.declined { opacity: 0.45; }
-  .ev.declined .ev-title { text-decoration: line-through; }
-  .ev.tentative .ev-title::after { content: ' ?'; color: var(--gold); }
+  .dbtn:nth-child(8) { border-right: 1px solid var(--border); }
+  .dbtn .wd { font-family: var(--mono); font-size: calc(var(--u) * 0.95); letter-spacing: 0.2em; color: var(--mid); }
+  .dbtn .dn { font-family: var(--display); font-weight: 700; font-size: calc(var(--u) * 1.55); color: var(--text); }
+  .dbtn.work { background: var(--work); }
+  .dbtn.today .wd, .dbtn.today .dn { color: var(--accent); }
+  .dbtn.today .dn { text-shadow: 0 0 12px rgba(0,212,255,0.6); }
+  .dbtn.sel { background: rgba(255,170,0,0.10); box-shadow: inset 0 calc(var(--u) * -0.25) 0 var(--gold); }
+  .dbtn.sel .dn { color: var(--gold); }
+  .dbtn.sel.today .dn { color: var(--accent); }
+  .dbtn .cnt { position: absolute; top: calc(var(--u) * 0.35); right: calc(var(--u) * 0.45); width: calc(var(--u) * 0.45); height: calc(var(--u) * 0.45); border-radius: 50%; background: var(--accent); opacity: 0.8; }
 
-  /* ── 7-DAY STRIP ── */
-  .strip {
-    grid-column: 2; grid-row: 2;
-    display: grid; grid-template-columns: repeat(7, 1fr);
-    height: 31vh; min-height: 0;
-    border-top: 1px solid var(--border);
-    background: rgba(5,5,8,0.6);
-  }
-  .day {
-    display: flex; flex-direction: column; min-width: 0; overflow: hidden;
-    padding: calc(var(--unit) * 0.8) calc(var(--unit) * 0.7);
-    border-right: 1px solid var(--border);
-    cursor: pointer;
-  }
-  .day:last-child { border-right: 0; }
-  .day-head { display: flex; align-items: baseline; gap: 0.4em; flex-shrink: 0; }
-  .day-name { font-family: var(--mono); font-size: calc(var(--unit) * 1.05); letter-spacing: 0.2em; color: var(--dim); }
-  .day-num { font-family: var(--display); font-weight: 700; font-size: calc(var(--unit) * 1.9); color: var(--text); }
-  .day.today .day-name, .day.today .day-num { color: var(--accent); }
-  .day.today { background: rgba(0,212,255,0.05); }
-  .day.sel { background: rgba(255,170,0,0.08); box-shadow: inset 0 calc(var(--unit) * 0.25) 0 var(--gold); }
-  .day.sel .day-num { color: var(--gold); }
-  .day-evs { margin-top: calc(var(--unit) * 0.5); overflow: hidden; }
-  .day-ev {
-    font-size: calc(var(--unit) * 1.15); line-height: 1.3; color: var(--text);
+  /* ── VIEW AREA ── */
+  .view { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; margin-top: calc(var(--u) * 0.8); }
+
+  /* all-day / outside-hours chips */
+  .chips { flex-shrink: 0; display: flex; flex-wrap: wrap; gap: calc(var(--u) * 0.5); margin: 0 0 calc(var(--u) * 0.7) var(--gut); }
+  .chip {
+    display: inline-flex; align-items: baseline; gap: 0.5em; max-width: 100%;
+    padding: calc(var(--u) * 0.35) calc(var(--u) * 0.8);
+    font-size: calc(var(--u) * 1.25); font-weight: 700; color: var(--bright);
+    background: rgba(0,212,255,0.16); border-left: calc(var(--u) * 0.25) solid var(--accent);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    padding-left: 0.45em; border-left: 2px solid var(--accent); margin-bottom: 0.25em;
   }
-  .day-ev .t { font-family: var(--mono); font-size: 0.85em; color: var(--dim); margin-right: 0.35em; }
-  .day-ev.declined { opacity: 0.45; text-decoration: line-through; }
-  .day-more { font-family: var(--mono); font-size: calc(var(--unit) * 0.9); color: var(--dim); letter-spacing: 0.1em; }
-  .day-none { font-size: calc(var(--unit) * 1.0); color: var(--dim); }
+  .chip .k { font-family: var(--mono); font-weight: 400; font-size: 0.8em; letter-spacing: 0.12em; color: var(--accent2); }
+  .chip.declined { opacity: 0.45; text-decoration: line-through; }
+  .wk-allday { flex-shrink: 0; display: flex; margin-bottom: calc(var(--u) * 0.6); }
+  .wk-allday .lbl { flex: 0 0 var(--gut); font-family: var(--mono); font-size: calc(var(--u) * 0.7); letter-spacing: 0.12em; color: var(--mid); padding-top: 0.5em; }
+  .wk-allday .cells { flex: 1; min-width: 0; display: flex; }
+  .wk-allday .cell { flex: 1; min-width: 0; padding: 0 2px; display: flex; flex-direction: column; gap: 2px; }
+  .wk-allday .sp { flex: 0 0 var(--nav); }
+  .wk-allday .chip { font-size: calc(var(--u) * 0.9); padding: calc(var(--u) * 0.2) calc(var(--u) * 0.4); display: block; }
+  .wk-allday .more { font-family: var(--mono); font-size: calc(var(--u) * 0.75); color: var(--mid); }
 
-  /* ── MONTH OVERLAY ── */
-  .month {
-    position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 20;
-    background: var(--bg);
-    display: none; flex-direction: column;
-    padding: calc(var(--unit) * 2) calc(var(--unit) * 3);
+  /* time grid */
+  .tl { flex: 1; min-height: 0; display: flex; position: relative; padding: calc(var(--u) * 0.6) 0; }
+  .tl-hours { flex: 0 0 var(--gut); position: relative; }
+  .tl-hl {
+    position: absolute; right: calc(var(--u) * 0.7); transform: translateY(-50%);
+    font-family: var(--mono); font-size: calc(var(--u) * 1.0); color: var(--mid); white-space: nowrap;
   }
-  .month.open { display: flex; }
-  .month-head { display: flex; align-items: center; gap: calc(var(--unit) * 1.5); flex-shrink: 0; }
-  .month-title { font-family: var(--display); font-weight: 900; font-size: calc(var(--unit) * 2.4); letter-spacing: 0.2em; color: var(--accent); flex: 1; }
-  .month-nav { font-size: calc(var(--unit) * 1.8); padding: calc(var(--unit) * 0.5) calc(var(--unit) * 1.4); letter-spacing: 0; }
-  .month-grid {
-    flex: 1; min-height: 0;
-    display: grid; grid-template-columns: repeat(7, 1fr); grid-template-rows: auto; grid-auto-rows: 1fr;
-    gap: 2px; margin-top: calc(var(--unit) * 1.2);
+  .tl-body { flex: 1; min-width: 0; position: relative; display: flex; }
+  .tl-spacer { flex: 0 0 var(--nav); }
+  .tl-line { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--line); z-index: 1; pointer-events: none; }
+  .tl-line.half { border-top-style: dashed; border-top-color: rgba(120,140,170,0.06); }
+  .tl-col { flex: 1; min-width: 0; position: relative; border-left: 1px solid var(--border); }
+  .tl-col:last-child { border-right: 1px solid var(--border); }
+  .tl-col.work { background: var(--work); }
+  .tl-col.out { background: repeating-linear-gradient(135deg, rgba(58,69,88,0.10) 0 10px, transparent 10px 20px); }
+  .week .tl-col { cursor: pointer; }
+
+  .ev {
+    position: absolute; z-index: 2; overflow: hidden;
+    padding: calc(var(--u) * 0.3) calc(var(--u) * 0.6);
+    border-left: calc(var(--u) * 0.28) solid var(--accent);
+    background: rgba(0,212,255,0.20);
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px rgba(5,5,8,0.9);
   }
-  .month-wd { font-family: var(--mono); font-size: calc(var(--unit) * 1.0); letter-spacing: 0.2em; color: var(--dim); text-align: center; align-self: end; padding-bottom: 0.4em; }
-  .month-grid .month-wd { grid-row: 1; }
+  .ev-t { font-family: var(--mono); font-size: calc(var(--u) * 1.0); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ev-n { font-size: calc(var(--u) * 1.45); font-weight: 700; line-height: 1.15; color: var(--bright); overflow-wrap: anywhere; }
+  .ev-l { font-size: calc(var(--u) * 1.05); color: var(--text); opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ev.short { display: flex; align-items: baseline; gap: 0.6em; white-space: nowrap; padding-top: calc(var(--u) * 0.1); padding-bottom: 0; }
+  .ev.short .ev-n { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ev.declined { opacity: 0.42; }
+  .ev.declined .ev-n { text-decoration: line-through; }
+  .ev.tentative { border-left-style: dashed; }
+  .ev.tentative .ev-n::after { content: ' ?'; color: var(--gold); }
+  .week .ev { padding: calc(var(--u) * 0.15) calc(var(--u) * 0.3); }
+  .week .ev-t { font-size: calc(var(--u) * 0.75); }
+  .week .ev-n { font-size: calc(var(--u) * 0.95); overflow-wrap: normal; word-break: keep-all; }
+  .week .ev.short { display: block; }
+  .week .ev.short .ev-t { display: none; }
+
+  .now-line { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid var(--now); z-index: 3; pointer-events: none; box-shadow: 0 0 10px var(--now); }
+  .now-line::before {
+    content: ''; position: absolute; left: calc(var(--u) * -0.5); top: calc(var(--u) * -0.5 - 1px);
+    width: calc(var(--u) * 1.0); height: calc(var(--u) * 1.0); border-radius: 50%; background: var(--now);
+  }
+  .msg {
+    position: absolute; top: 40%; left: var(--gut); right: 0; z-index: 4; text-align: center; pointer-events: none;
+    font-size: calc(var(--u) * 2.4); font-weight: 600; color: var(--mid); letter-spacing: 0.05em;
+  }
+  .msg span { display: inline-block; padding: 0.25em 0.9em; background: rgba(5,5,8,0.92); border: 1px solid var(--border); }
+
+  /* ── MONTH ── */
+  .mgrid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-auto-rows: 1fr; gap: 2px; }
+  .mwd { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; flex-shrink: 0; }
+  .mwd div { font-family: var(--mono); font-size: calc(var(--u) * 0.95); letter-spacing: 0.2em; color: var(--mid); text-align: center; padding: 0.3em 0 0.5em; }
+  .mwd div.work { color: var(--text); }
   .mday {
-    position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    background: rgba(13,13,20,0.9); border: 1px solid var(--border); cursor: pointer; min-height: 0;
+    position: relative; min-height: 0; overflow: hidden; cursor: pointer;
+    background: rgba(13,13,20,0.92); border: 1px solid var(--border);
+    padding: calc(var(--u) * 0.5) calc(var(--u) * 0.6);
+    display: flex; flex-direction: column;
   }
-  .mday.blank { background: transparent; border-color: transparent; cursor: default; }
-  .mday .n { font-family: var(--display); font-weight: 700; font-size: calc(var(--unit) * 1.9); color: var(--text); }
-  .mday.today .n { color: var(--accent); }
-  .mday.today { border-color: rgba(0,212,255,0.5); }
+  .mday.work { background: #0c1420; }
+  .mday .n { font-family: var(--display); font-weight: 700; font-size: calc(var(--u) * 1.5); color: var(--text); }
+  .mday.other .n { color: var(--dim); }
+  .mday.today { border-color: rgba(0,212,255,0.7); box-shadow: inset 0 0 0 1px rgba(0,212,255,0.5); }
+  .mday.today .n { color: var(--accent); text-shadow: 0 0 12px rgba(0,212,255,0.6); }
   .mday.sel { box-shadow: inset 0 0 0 2px var(--gold); }
-  .mday.out .n { color: var(--dim); }
-  .dots { display: flex; gap: 0.3em; margin-top: 0.3em; height: calc(var(--unit) * 0.7); }
-  .dot { width: calc(var(--unit) * 0.7); height: calc(var(--unit) * 0.7); border-radius: 50%; background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .mday.out .n { opacity: 0.55; }
+  .mday .dots { display: flex; flex-wrap: wrap; gap: calc(var(--u) * 0.3); margin-top: auto; align-items: center; }
+  .mday .dot { width: calc(var(--u) * 0.65); height: calc(var(--u) * 0.65); border-radius: 50%; background: var(--accent); }
+  .mday .count { font-family: var(--mono); font-size: calc(var(--u) * 0.95); color: var(--text); margin-left: 0.2em; }
 
-  /* ── DEXTER DRAWER ── */
+  /* ── SETTINGS SHEET ── */
+  .sheet-scrim { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 40; background: rgba(0,0,0,0.65); display: none; }
+  .sheet-scrim.open { display: block; }
+  .sheet {
+    position: fixed; z-index: 41; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: min(60vw, 1100px); max-height: 92%;
+    display: none; flex-direction: column;
+    background: var(--bg); border: 1px solid rgba(0,212,255,0.35);
+    box-shadow: 0 0 60px rgba(0,0,0,0.8), 0 0 30px rgba(0,212,255,0.12);
+  }
+  .sheet.open { display: flex; }
+  .sheet-head {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+    padding: calc(var(--u) * 1.1) calc(var(--u) * 1.6); border-bottom: 1px solid var(--border);
+  }
+  .sheet-title { font-family: var(--display); font-weight: 900; font-size: calc(var(--u) * 1.3); letter-spacing: 0.3em; color: var(--accent); }
+  .sheet-body { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: calc(var(--u) * 0.6) calc(var(--u) * 1.6) calc(var(--u) * 1.4); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: calc(var(--u) * 1.2); padding: calc(var(--u) * 0.55) 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: 0; }
+  .row-l { font-size: calc(var(--u) * 1.45); font-weight: 700; color: var(--bright); min-width: 0; display: flex; align-items: center; gap: 0.6em; }
+  .row-l small { display: block; font-size: 0.72em; font-weight: 400; color: var(--mid); }
+  .seg { display: flex; flex-shrink: 0; border: 1px solid rgba(0,212,255,0.35); border-radius: 2px; }
+  .seg div {
+    min-width: calc(var(--u) * 7.5); text-align: center;
+    font-family: var(--display); font-weight: 700; font-size: calc(var(--u) * 0.95); letter-spacing: 0.15em;
+    padding: calc(var(--u) * 0.9) calc(var(--u) * 1.0); color: var(--accent); cursor: pointer;
+    border-right: 1px solid rgba(0,212,255,0.35);
+  }
+  .seg div:last-child { border-right: 0; }
+  .seg div.on { background: var(--accent); color: #050508; }
+  .step { display: flex; align-items: center; flex-shrink: 0; gap: calc(var(--u) * 0.6); }
+  .step .btn { min-width: calc(var(--u) * 4.2); font-size: calc(var(--u) * 1.6); padding: calc(var(--u) * 0.55) 0; font-family: var(--body); letter-spacing: 0; }
+  .step .v { min-width: calc(var(--u) * 7); text-align: center; font-family: var(--mono); font-size: calc(var(--u) * 1.6); color: var(--bright); }
+  .swatch { flex: 0 0 auto; width: calc(var(--u) * 1.2); height: calc(var(--u) * 1.2); border-radius: 50%; background: var(--accent); }
+  .sec-label { font-family: var(--mono); font-size: calc(var(--u) * 0.85); letter-spacing: 0.25em; color: var(--mid); padding: calc(var(--u) * 0.9) 0 0; }
+  .note { font-size: calc(var(--u) * 1.15); color: var(--mid); padding: calc(var(--u) * 0.6) 0; }
+
+  /* ── DEXTER DRAWER (chat, unchanged from v1) ── */
   .drawer {
     position: fixed; top: 0; right: 0; bottom: 0; z-index: 30;
     width: 46%; max-width: 980px;
@@ -245,116 +379,162 @@
   .drawer.open { transform: translateX(0); }
   .drawer-head {
     display: flex; align-items: center; justify-content: space-between;
-    height: calc(var(--unit) * 3.4); padding: 0 calc(var(--unit) * 1.2);
+    height: calc(var(--u) * 3.4); padding: 0 calc(var(--u) * 1.2);
     border-bottom: 1px solid var(--border); flex-shrink: 0; background: rgba(5,5,8,0.95);
   }
-  .drawer-head .logo { font-size: calc(var(--unit) * 0.9); }
-  .drawer-close { font-size: calc(var(--unit) * 0.95); padding: calc(var(--unit) * 0.5) calc(var(--unit) * 1.1); }
+  .logo {
+    font-family: var(--display); font-weight: 900;
+    font-size: calc(var(--u) * 0.9); letter-spacing: 0.5em;
+    color: var(--accent); text-shadow: 0 0 14px rgba(0,212,255,0.5);
+  }
+  .drawer-close { font-size: calc(var(--u) * 0.95); padding: calc(var(--u) * 0.5) calc(var(--u) * 1.1); }
   .drawer iframe { flex: 1; width: 100%; border: 0; background: var(--bg); }
   .scrim { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 29; background: rgba(0,0,0,0.5); display: none; }
   .scrim.open { display: block; }
 
-  /* ── PORTRAIT / PHONE: one column, strip scrolls sideways ── */
+  @media (prefers-reduced-motion: reduce) {
+    .face-border, .face-scan::after { animation: none; }
+    .drawer { transition: none; }
+  }
+
+  /* ── PORTRAIT / PHONE: face + clock row, tabs, then the view; gear in the header ── */
   @media (max-width: 760px), (orientation: portrait) {
-    :root { --unit: 2.1vw; }
-    .wall { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
-    .now {
-      grid-row: 1; grid-column: 1;
-      flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 0 calc(var(--unit) * 1.5);
-      padding: calc(var(--unit) * 2) calc(var(--unit) * 2) calc(var(--unit) * 1);
+    :root { --u: 2.5px; --gut: 44px; --nav: 34px; }
+    .app { flex-direction: column; }
+    .side {
+      flex: 0 0 auto;
+      display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas: "face time gear" "next next next" "status status status";
+      column-gap: 12px; row-gap: 6px; align-items: center;
+      padding: calc(10px + var(--safe-top)) 14px 8px;
       border-right: 0; border-bottom: 1px solid var(--border);
     }
-    .logo { width: 100%; font-size: calc(var(--unit) * 1.4); }
-    .clock { margin-top: calc(var(--unit) * 0.6); font-size: calc(var(--unit) * 7.5); }
-    .clock .ampm { font-size: calc(var(--unit) * 2.4); }
-    .weekday { margin-top: 0; font-size: calc(var(--unit) * 3.2); }
-    .date { margin-top: 0; font-size: calc(var(--unit) * 2.6); width: 100%; }
-    .status { width: 100%; margin-top: calc(var(--unit) * 0.6); padding-top: 0; font-size: calc(var(--unit) * 1.5); }
-    .buttons { display: none; }
-    .agenda { grid-column: 1; grid-row: 2; padding: calc(var(--unit) * 1.8) calc(var(--unit) * 2) 0; }
-    .agenda-label { font-size: calc(var(--unit) * 2.6); }
-    .agenda-date { font-size: calc(var(--unit) * 2.4); }
-    .agenda-back { font-size: calc(var(--unit) * 1.6); }
-    .ev { flex-direction: column; gap: calc(var(--unit) * 0.4); padding: calc(var(--unit) * 1.4) calc(var(--unit) * 1.6); border-left-width: 4px; }
-    .ev-time { flex-basis: auto; font-size: calc(var(--unit) * 2.2); }
-    .ev-title { font-size: calc(var(--unit) * 3.0); }
-    .ev-loc { font-size: calc(var(--unit) * 2.2); }
-    .ev-cal { font-size: calc(var(--unit) * 1.5); }
-    .empty { font-size: calc(var(--unit) * 3.2); }
-    .strip {
-      grid-column: 1; grid-row: 3;
-      display: flex; overflow-x: auto; -webkit-overflow-scrolling: touch;
-      height: 30vh; padding-bottom: calc(var(--unit) * 12 + var(--safe-bottom));
-    }
-    .day { flex: 0 0 42vw; padding: calc(var(--unit) * 1.4) calc(var(--unit) * 1.4); }
-    .day-name { font-size: calc(var(--unit) * 1.7); }
-    .day-num { font-size: calc(var(--unit) * 3.0); }
-    .day-ev { font-size: calc(var(--unit) * 2.0); }
-    .day-more, .day-none { font-size: calc(var(--unit) * 1.7); }
-    .mobile-bar {
-      position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-      display: flex; gap: calc(var(--unit) * 1.2);
-      padding: calc(var(--unit) * 1.5) calc(var(--unit) * 2) calc(var(--unit) * 1.5 + var(--safe-bottom));
-      background: rgba(5,5,8,0.95); border-top: 1px solid var(--border);
-    }
-    .mobile-bar .btn { flex: 1; font-size: calc(var(--unit) * 2.0); padding: calc(var(--unit) * 1.8) 0; }
-    .month { padding: calc(var(--unit) * 2.5) calc(var(--unit) * 2); }
-    .month-title { font-size: calc(var(--unit) * 1.9); letter-spacing: 0.08em; text-align: center; }
-    .month-nav { font-size: calc(var(--unit) * 3); }
-    .month-wd { font-size: calc(var(--unit) * 1.7); }
-    .mday .n { font-size: calc(var(--unit) * 3.0); }
-    .dots { height: calc(var(--unit) * 1.4); }
-    .dot { width: calc(var(--unit) * 1.4); height: calc(var(--unit) * 1.4); }
+    .face-zone { grid-area: face; align-self: center; }
+    .face { width: 64px; height: 64px; }
+    .face-cap { margin-top: 4px; font-size: 8px; letter-spacing: 0.18em; }
+    .time { grid-area: time; margin-top: 0; }
+    .clock { font-size: 40px; }
+    .clock .sub { font-size: 13px; }
+    .weekday { display: inline; margin-top: 0; font-size: 16px; }
+    .date { display: inline; margin-top: 0; font-size: 16px; margin-left: 0.4em; }
+    .side-foot { display: contents; }
+    .gear { grid-area: gear; width: 48px; height: 48px; align-self: start; }
+    .status { grid-area: status; font-size: 10px; }
+    .next { grid-area: next; margin-top: 2px; padding: 8px 10px; border-left-width: 3px; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 2px; }
+    .next-label { font-size: 9px; letter-spacing: 0.2em; flex: 0 0 auto; }
+    .next-none { margin-top: 0; font-size: 15px; }
+    .next-title { margin-top: 0; font-size: 16px; flex: 1 1 60%; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .next-time { margin-top: 0; font-size: 13px; }
+    .next-in { margin-top: 0; font-size: 13px; }
+    .main { padding: 8px 10px calc(8px + var(--safe-bottom)); }
+    .bar { flex-wrap: wrap; row-gap: 6px; gap: 8px; }
+    .tab { font-size: 12px; letter-spacing: 0.18em; padding: 11px 14px; }
+    .head { order: 3; flex: 1 0 100%; }
+    .head-label { font-size: 13px; letter-spacing: 0.15em; }
+    .head-date { font-size: 15px; }
+    .btn { font-size: 11px; padding: 11px 12px; letter-spacing: 0.15em; }
+    .btn.arrow { font-size: 22px; padding: 4px 12px; }
+    .days { margin-top: 8px; }
+    .dnav { font-size: 26px; }
+    .dbtn { flex-direction: column; align-items: center; gap: 0; padding: 6px 0 5px; }
+    .dbtn .wd { font-size: 10px; letter-spacing: 0.1em; }
+    .dbtn .dn { font-size: 17px; }
+    .dbtn .cnt { width: 5px; height: 5px; top: 4px; right: 4px; }
+    .view { margin-top: 6px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .view::-webkit-scrollbar { display: none; }
+    .tl { flex: 1 0 auto; min-height: calc(var(--hours) * 44px); padding: 8px 0; }
+    .tl-hl { font-size: 10px; right: 6px; }
+    .chips { margin-left: var(--gut); gap: 4px; margin-bottom: 6px; }
+    .chip { font-size: 13px; padding: 3px 8px; border-left-width: 3px; }
+    .ev { padding: 2px 5px; border-left-width: 3px; }
+    .ev-t { font-size: 11px; }
+    .ev-n { font-size: 14px; }
+    .ev-l { font-size: 11px; }
+    .week .ev { padding: 1px 2px; border-left-width: 2px; }
+    .week .ev-t { display: none; }
+    .week .ev-n { font-size: 10px; line-height: 1.1; }
+    .wk-allday .lbl { font-size: 8px; }
+    .wk-allday .chip { font-size: 9px; padding: 1px 2px; border-left-width: 2px; }
+    .wk-allday .more { font-size: 9px; }
+    .now-line::before { width: 8px; height: 8px; left: -4px; top: -5px; }
+    .msg { font-size: 18px; }
+    .mwd div { font-size: 10px; letter-spacing: 0.08em; }
+    .mgrid { flex: 1 0 auto; min-height: 380px; }
+    .mday { padding: 3px 4px; }
+    .mday .n { font-size: 14px; }
+    .mday .dot { width: 6px; height: 6px; }
+    .mday .count { font-size: 10px; }
+    .sheet { top: 0; left: 0; transform: none; width: 100%; max-height: none; height: 100%; }
+    .sheet-head { padding: calc(10px + var(--safe-top)) 14px 10px; }
+    .sheet-title { font-size: 14px; }
+    .sheet-body { padding: 4px 14px calc(20px + var(--safe-bottom)); }
+    .row { flex-wrap: wrap; padding: 12px 0; gap: 10px; }
+    .row-l { font-size: 16px; }
+    .seg div { min-width: 82px; font-size: 11px; padding: 13px 8px; }
+    .step .btn { min-width: 52px; font-size: 22px; padding: 6px 0; }
+    .step .v { min-width: 70px; font-size: 17px; }
+    .swatch { width: 14px; height: 14px; }
+    .sec-label { font-size: 10px; padding-top: 14px; }
+    .note { font-size: 14px; }
     .drawer { width: 100%; max-width: none; }
-    .drawer-head { height: calc(var(--unit) * 7); padding: 0 calc(var(--unit) * 2); }
-    .drawer-head .logo { width: auto; font-size: calc(var(--unit) * 2.2); }
-    .drawer-close { font-size: calc(var(--unit) * 2.2); padding: calc(var(--unit) * 1.2) calc(var(--unit) * 2.2); }
-  }
-  @media (min-width: 761px) and (orientation: landscape) {
-    .mobile-bar { display: none; }
+    .drawer-head { height: 56px; padding: 0 14px; }
+    .logo { font-size: 12px; }
+    .drawer-close { font-size: 12px; padding: 12px 16px; }
   }
 </style>
 </head>
 <body>
 
-<div class="wall" id="wall">
-  <aside class="now">
-    <div class="logo">DEXTER</div>
-    <div class="clock" id="clock">--:--</div>
-    <div class="weekday" id="weekday">&nbsp;</div>
-    <div class="date" id="date">&nbsp;</div>
-    <div class="status" id="status">loading…</div>
-    <div class="buttons">
-      <div class="btn" id="monthBtn">MONTH</div>
-      <div class="btn primary" id="dexterBtn">DEXTER</div>
+<div class="app" id="app">
+  <aside class="side">
+    <div class="face-zone" id="face" role="button" aria-label="Talk to DEXTER">
+      <div class="face-amb"></div>
+      <div class="face">
+        <div class="face-border"></div>
+        <div class="face-img-wrap">
+          <video class="face-video" id="faceVideo" muted loop playsinline preload="auto" poster="avatar.png" aria-label="DEXTER"></video>
+          <img class="face-img" id="faceImg" src="avatar.png" alt="DEXTER">
+          <div class="face-scan"></div>
+        </div>
+      </div>
+      <div class="face-cap">Tap to talk</div>
+    </div>
+    <div class="time">
+      <div class="clock" id="clock">--:--</div>
+      <div class="weekday" id="weekday">&nbsp;</div>
+      <div class="date" id="date">&nbsp;</div>
+    </div>
+    <div class="next" id="next"><div class="next-label">NEXT UP</div></div>
+    <div class="side-foot">
+      <div class="gear" id="gearBtn" role="button" aria-label="Settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill-rule="evenodd" d="M20.05 9.99L22.89 10.47L22.89 13.53L20.05 14.01L19.11 16.27L20.78 18.62L18.62 20.78L16.27 19.11L14.01 20.05L13.53 22.89L10.47 22.89L9.99 20.05L7.73 19.11L5.38 20.78L3.22 18.62L4.89 16.27L3.95 14.01L1.11 13.53L1.11 10.47L3.95 9.99L4.89 7.73L3.22 5.38L5.38 3.22L7.73 4.89L9.99 3.95L10.47 1.11L13.53 1.11L14.01 3.95L16.27 4.89L18.62 3.22L20.78 5.38L19.11 7.73Z M8.4 12a3.6 3.6 0 1 0 7.2 0a3.6 3.6 0 1 0 -7.2 0Z"/></svg></div>
+      <div class="status" id="status">loading…</div>
     </div>
   </aside>
 
-  <section class="agenda" id="agenda">
-    <div class="agenda-head">
-      <span class="agenda-label" id="agendaLabel">TODAY</span>
-      <span class="agenda-date" id="agendaDate"></span>
-      <span class="agenda-back" id="agendaBack">BACK TO TODAY</span>
+  <section class="main">
+    <div class="bar">
+      <div class="tabs">
+        <div class="tab on" id="tabDay" data-view="day">DAY</div>
+        <div class="tab" id="tabWeek" data-view="week">WEEK</div>
+        <div class="tab" id="tabMonth" data-view="month">MONTH</div>
+      </div>
+      <div class="btn arrow hide" id="monthPrev" aria-label="Previous month">&lsaquo;</div>
+      <div class="head" id="head"><span class="head-label" id="headLabel"></span><span class="head-date" id="headDate"></span></div>
+      <div class="btn arrow hide" id="monthNext" aria-label="Next month">&rsaquo;</div>
+      <div class="btn gold hide" id="todayBtn">TODAY</div>
     </div>
-    <div class="agenda-list" id="agendaList"></div>
+    <div class="days" id="days"></div>
+    <div class="view" id="view"></div>
   </section>
-
-  <section class="strip" id="strip"></section>
 </div>
 
-<div class="mobile-bar">
-  <div class="btn" id="monthBtnM">MONTH</div>
-  <div class="btn primary" id="dexterBtnM">DEXTER</div>
-</div>
-
-<div class="month" id="month">
-  <div class="month-head">
-    <div class="btn month-nav" id="monthPrev">&lsaquo;</div>
-    <div class="month-title" id="monthTitle"></div>
-    <div class="btn month-nav" id="monthNext">&rsaquo;</div>
-    <div class="btn" id="monthClose">CLOSE</div>
+<div class="sheet-scrim" id="sheetScrim"></div>
+<div class="sheet" id="sheet" role="dialog" aria-label="Calendar settings">
+  <div class="sheet-head">
+    <div class="sheet-title">SETTINGS</div>
+    <div class="btn" id="sheetDone">DONE</div>
   </div>
-  <div class="month-grid" id="monthGrid"></div>
+  <div class="sheet-body" id="sheetBody"></div>
 </div>
 
 <div class="scrim" id="scrim"></div>
@@ -371,7 +551,8 @@
   'use strict';
   var REFRESH_MS = 5 * 60 * 1000;
   var DEFAULT_TZ = 'America/New_York';
-  var DAY = 86400000;
+  var SETTINGS_KEY = 'dexterCalSettings';
+  var MIN_BLOCK = 25;   // minutes: the shortest a block is drawn, so a 5-minute event is still readable
   var WD = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
   var WD_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -380,9 +561,11 @@
   var lastGood = null;    // Date of the last good fetch
   var tz = DEFAULT_TZ;
   var todayKey = '';
-  var selectedKey = '';   // '' = today
-  var monthCursor = null; // {y, m} shown in the overlay
-  var byDay = {};         // key -> events on that day (built on render)
+  var selKey = '';        // the day DAY shows; the day-button row shows its week
+  var view = 'day';       // 'day' | 'week' | 'month'
+  var monthCursor = null; // {y, m} shown in MONTH
+  var byDay = {};         // key -> visible entries on that day (rebuilt on every render)
+  var lastMinute = '';
 
   var $ = function (id) { return document.getElementById(id); };
   function el(tag, cls, text) {
@@ -391,18 +574,40 @@
     if (text !== undefined && text !== null) e.textContent = text;
     return e;
   }
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
-  // ── time in the calendar's zone ──
+  // ── settings: display only, this device only, never the kiosk's own settings ──
+  function defaults() { return { clock24: true, seconds: false, weekStart: 0, workShade: true, dayStart: 5, dayEnd: 23, hiddenCals: [] }; }
+  function intIn(v, lo, hi) { return (typeof v === 'number' && v % 1 === 0 && v >= lo && v <= hi) ? v : null; }
+  function loadSettings() {
+    var s = defaults();
+    var raw = null;
+    try { raw = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null'); } catch (e) { raw = null; }
+    if (raw && typeof raw === 'object') {
+      if (typeof raw.clock24 === 'boolean') s.clock24 = raw.clock24;
+      if (typeof raw.seconds === 'boolean') s.seconds = raw.seconds;
+      if (raw.weekStart === 0 || raw.weekStart === 1) s.weekStart = raw.weekStart;
+      if (typeof raw.workShade === 'boolean') s.workShade = raw.workShade;
+      var a = intIn(raw.dayStart, 0, 23), b = intIn(raw.dayEnd, 1, 24);
+      if (a !== null && b !== null && a < b) { s.dayStart = a; s.dayEnd = b; }
+      if (Array.isArray(raw.hiddenCals)) s.hiddenCals = raw.hiddenCals.filter(function (x) { return typeof x === 'string'; });
+    }
+    return s;
+  }
+  var S = loadSettings();
+  function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(S)); } catch (e) {} }
+
+  // ── time in the calendar's zone (never the device's) ──
   var partFmt = {};
   function partsIn(date, zone) {
     var f = partFmt[zone];
     if (!f) {
-      f = partFmt[zone] = new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      f = partFmt[zone] = new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
     }
     var out = {};
     var parts = f.formatToParts(date);
     for (var i = 0; i < parts.length; i++) out[parts[i].type] = parts[i].value;
-    return { y: +out.year, m: +out.month, d: +out.day, h: (+out.hour) % 24, mi: +out.minute };
+    return { y: +out.year, m: +out.month, d: +out.day, h: (+out.hour) % 24, mi: +out.minute, s: +out.second };
   }
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
   function keyOf(p) { return p.y + '-' + pad2(p.m) + '-' + pad2(p.d); }
@@ -415,204 +620,556 @@
     return t.getUTCFullYear() + '-' + pad2(t.getUTCMonth() + 1) + '-' + pad2(t.getUTCDate());
   }
   function weekdayOf(key) { var p = parseKey(key); return new Date(Date.UTC(p.y, p.m - 1, p.d)).getUTCDay(); }
+  function isWork(key) { var w = weekdayOf(key); return w >= 1 && w <= 5; }   // Mon–Fri, whatever the week start
+  function weekStartOf(key) { return addDays(key, -((weekdayOf(key) - S.weekStart + 7) % 7)); }
   function longDate(key) { var p = parseKey(key); return WD_LONG[weekdayOf(key)] + ', ' + MONTHS[p.m - 1] + ' ' + p.d; }
   function shortDate(key) { var p = parseKey(key); return MONTHS[p.m - 1].slice(0, 3) + ' ' + p.d; }
 
-  function clock12(p) {
-    var h = p.h % 12; if (h === 0) h = 12;
-    return { hm: h + ':' + pad2(p.mi), ampm: p.h < 12 ? 'AM' : 'PM' };
+  // ── formatting: 24-hour by default, 12-hour from the settings sheet ──
+  function fmtHM(h, mi) {
+    if (S.clock24) return pad2(h) + ':' + pad2(mi);
+    var hh = h % 12; if (hh === 0) hh = 12;
+    return hh + ':' + pad2(mi) + ' ' + ((h % 24) < 12 ? 'AM' : 'PM');
   }
-  function timeOf(iso) { return clock12(partsIn(new Date(iso), tz)); }
-  function fmtTime(iso) { var t = timeOf(iso); return t.hm + ' ' + t.ampm; }
+  function fmtHour(h) {
+    if (S.clock24) return pad2(h) + ':00';
+    var hh = h % 12; if (hh === 0) hh = 12;
+    return hh + ' ' + ((h % 24) < 12 ? 'AM' : 'PM');
+  }
   function fmtRange(ev) {
-    var a = timeOf(ev.start), b = timeOf(ev.end);
-    if (ev.end === ev.start) return a.hm + ' ' + a.ampm;
-    if (a.ampm === b.ampm) return a.hm + ' – ' + b.hm + ' ' + a.ampm;
-    return a.hm + ' ' + a.ampm + ' – ' + b.hm + ' ' + b.ampm;
+    var a = ev._s, b = ev._e;
+    if (S.clock24) return ev.end === ev.start ? fmtHM(a.h, a.mi) : fmtHM(a.h, a.mi) + '–' + fmtHM(b.h, b.mi);
+    var am = a.h < 12, bm = b.h < 12;
+    var ah = a.h % 12 || 12, bh = b.h % 12 || 12;
+    if (ev.end === ev.start) return ah + ':' + pad2(a.mi) + ' ' + (am ? 'AM' : 'PM');
+    if (am === bm) return ah + ':' + pad2(a.mi) + '–' + bh + ':' + pad2(b.mi) + ' ' + (am ? 'AM' : 'PM');
+    return ah + ':' + pad2(a.mi) + ' ' + (am ? 'AM' : 'PM') + '–' + bh + ':' + pad2(b.mi) + ' ' + (bm ? 'AM' : 'PM');
   }
-  function fmtStatusTime(date) { var t = clock12(partsIn(date, tz)); return t.hm + t.ampm.toLowerCase(); }
+  function fmtStatusTime(date) {
+    var p = partsIn(date, tz);
+    if (S.clock24) return pad2(p.h) + ':' + pad2(p.mi);
+    return (p.h % 12 || 12) + ':' + pad2(p.mi) + (p.h < 12 ? 'am' : 'pm');
+  }
+  function fmtIn(ms) {
+    var m = Math.ceil(ms / 60000);
+    if (m < 60) return 'in ' + m + 'm';
+    var h = Math.floor(m / 60), r = m % 60;
+    return 'in ' + h + 'h' + (r ? ' ' + r + 'm' : '');
+  }
+
+  // ── calendars ──
+  function calOf(id) {
+    if (data && data.calendars) {
+      for (var i = 0; i < data.calendars.length; i++) if (data.calendars[i].id === id) return data.calendars[i];
+    }
+    return null;
+  }
+  function calColor(id) { var c = calOf(id); return (c && c.color) || '#00d4ff'; }
+  function shown(ev) { return S.hiddenCals.indexOf(ev.cal) < 0; }
+  function rgba(hex, a) {
+    var m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(hex || ''));
+    if (!m) return 'rgba(0,212,255,' + a + ')';
+    var h = m[1];
+    if (h.length === 3) h = h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
+    return 'rgba(' + parseInt(h.slice(0, 2), 16) + ',' + parseInt(h.slice(2, 4), 16) + ',' + parseInt(h.slice(4, 6), 16) + ',' + a + ')';
+  }
 
   // ── data → days ──
-  function eventsOn(key) {
+  function prepData(d) {
+    var evs = (d && d.events) || [];
+    for (var i = 0; i < evs.length; i++) {
+      var ev = evs[i];
+      if (ev.allDay) continue;
+      ev._s = partsIn(new Date(ev.start), tz);
+      ev._e = partsIn(new Date(ev.end || ev.start), tz);
+      ev._sk = keyOf(ev._s); ev._ek = keyOf(ev._e);
+      ev._st = new Date(ev.start).getTime();
+    }
+  }
+  function inWindow(key) { return key >= addDays(todayKey, -1) && key <= addDays(todayKey, 13); }
+  // Entries visible on `key`: {ev, allDay} or {ev, s, e} with s/e in wall-clock minutes of that day
+  // (h*60+mi, so a DST day still lines up with its hour labels). A timed event that crosses midnight
+  // appears on both days.
+  function entriesOn(key) {
     if (byDay[key]) return byDay[key];
     var out = [];
-    if (data && data.events) {
-      for (var i = 0; i < data.events.length; i++) {
-        var ev = data.events[i];
-        if (ev.allDay) {
-          var end = ev.end > ev.start ? ev.end : addDays(ev.start, 1);   // Google's end date is exclusive
-          if (ev.start <= key && key < end) out.push(ev);
-        } else if (dayKey(new Date(ev.start)) === key) {
-          out.push(ev);
-        }
+    var evs = (data && data.events) || [];
+    for (var i = 0; i < evs.length; i++) {
+      var ev = evs[i];
+      if (!shown(ev)) continue;
+      if (ev.allDay) {
+        var end = ev.end > ev.start ? ev.end : addDays(ev.start, 1);   // Google's end date is exclusive
+        if (ev.start <= key && key < end) out.push({ ev: ev, allDay: true });
+        continue;
       }
+      if (!ev._s || ev._sk > key || ev._ek < key) continue;
+      var s = ev._sk < key ? 0 : ev._s.h * 60 + ev._s.mi;
+      var e = ev._ek > key ? 1440 : ev._e.h * 60 + ev._e.mi;
+      if (ev._sk < key && e === 0) continue;   // ended exactly at this midnight
+      out.push({ ev: ev, s: s, e: Math.max(e, s) });
     }
     out.sort(function (a, b) {
-      if (a.allDay !== b.allDay) return a.allDay ? -1 : 1;
-      return a.start < b.start ? -1 : a.start > b.start ? 1 : 0;
+      if (!!a.allDay !== !!b.allDay) return a.allDay ? -1 : 1;
+      if (a.allDay) return a.ev.title < b.ev.title ? -1 : a.ev.title > b.ev.title ? 1 : 0;
+      return a.s - b.s || b.e - a.e;
     });
     byDay[key] = out;
     return out;
   }
-  function calColor(id) {
-    if (data && data.calendars) {
-      for (var i = 0; i < data.calendars.length; i++) if (data.calendars[i].id === id) return data.calendars[i].color || '';
-    }
-    return '';
-  }
-  function calName(id) {
-    if (data && data.calendars) {
-      for (var i = 0; i < data.calendars.length; i++) if (data.calendars[i].id === id) return data.calendars[i].name || '';
-    }
-    return '';
-  }
-  function inWindow(key) { return key >= addDays(todayKey, -1) && key <= addDays(todayKey, 13); }
 
-  // ── render ──
+  // Lanes: events that overlap (transitively) form a cluster; each takes the first free lane and the
+  // whole cluster splits the width evenly, so overlapping events sit side by side.
+  function layoutLanes(items) {
+    var cluster = null, clusterEnd = -1;
+    var clusters = [];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (!cluster || it.vs >= clusterEnd) { cluster = { items: [], ends: [] }; clusters.push(cluster); clusterEnd = it.ve; }
+      else if (it.ve > clusterEnd) clusterEnd = it.ve;
+      var lane = -1;
+      for (var j = 0; j < cluster.ends.length; j++) if (cluster.ends[j] <= it.vs) { lane = j; break; }
+      if (lane < 0) { lane = cluster.ends.length; cluster.ends.push(it.ve); } else cluster.ends[lane] = it.ve;
+      it.lane = lane;
+      cluster.items.push(it);
+    }
+    for (var c = 0; c < clusters.length; c++) {
+      for (var k = 0; k < clusters[c].items.length; k++) clusters[c].items[k].lanes = clusters[c].ends.length;
+    }
+  }
+
+  // ── clock + NEXT UP ──
   function renderClock() {
     var now = new Date();
     var p = partsIn(now, tz);
-    var t = clock12(p);
     var c = $('clock');
-    c.textContent = t.hm;
-    c.appendChild(el('span', 'ampm', t.ampm));
+    var main = S.clock24 ? pad2(p.h) + ':' + pad2(p.mi) : (p.h % 12 || 12) + ':' + pad2(p.mi);
+    var sub = '';
+    if (S.seconds) sub = ':' + pad2(p.s);
+    if (!S.clock24) sub += (S.seconds ? ' ' : '') + (p.h < 12 ? 'AM' : 'PM');
+    var want = main + '|' + sub;
+    if (c.getAttribute('data-v') !== want) {
+      c.setAttribute('data-v', want);
+      c.textContent = main;
+      if (sub) c.appendChild(el('span', 'sub', sub));
+    }
     var key = keyOf(p);
-    $('weekday').textContent = WD_LONG[weekdayOf(key)];
-    $('date').textContent = MONTHS[p.m - 1] + ' ' + p.d + ', ' + p.y;
+    var wd = WD_LONG[weekdayOf(key)];
+    if ($('weekday').textContent !== wd) $('weekday').textContent = wd;
+    var ds = MONTHS[p.m - 1] + ' ' + p.d + ', ' + p.y;
+    if ($('date').textContent !== ds) $('date').textContent = ds;
     if (key !== todayKey) {            // midnight: today moves, the view follows
-      todayKey = key; selectedKey = ''; byDay = {};
+      todayKey = key; selKey = key; monthCursor = null;
       renderAll();
+      return;
+    }
+    var minute = key + ' ' + p.h + ':' + p.mi;
+    if (minute !== lastMinute) {
+      lastMinute = minute;
+      placeNowLines(p);
+      renderNext();
     }
   }
 
-  function renderAgenda() {
-    var key = selectedKey || todayKey;
-    var away = key !== todayKey;
-    var agenda = $('agenda');
-    agenda.className = 'agenda' + (away ? ' away' : '');
-    var label = 'TODAY';
-    if (away) {
-      if (key === addDays(todayKey, 1)) label = 'TOMORROW';
-      else if (key === addDays(todayKey, -1)) label = 'YESTERDAY';
-      else label = WD_LONG[weekdayOf(key)].toUpperCase();
-    }
-    $('agendaLabel').textContent = label;
-    $('agendaDate').textContent = longDate(key);
-    var list = $('agendaList');
-    while (list.firstChild) list.removeChild(list.firstChild);
-    if (!data) { list.appendChild(el('div', 'empty', 'waiting for calendar')); return; }
-    if (!inWindow(key)) { list.appendChild(el('div', 'empty', 'outside the two-week window')); return; }
-    var evs = eventsOn(key);
-    if (!evs.length) { list.appendChild(el('div', 'empty', 'nothing scheduled')); return; }
+  function renderNext() {
+    var box = $('next');
+    clear(box);
+    box.appendChild(el('div', 'next-label', 'NEXT UP'));
+    if (!data) { box.appendChild(el('div', 'next-none', 'waiting for calendar')); return; }
+    var now = Date.now();
+    var tomorrow = addDays(todayKey, 1);
+    var best = null;
+    var evs = data.events || [];
     for (var i = 0; i < evs.length; i++) {
       var ev = evs[i];
-      var row = el('div', 'ev' + (ev.allDay ? ' allday' : '') + (ev.declined ? ' declined' : '') + (ev.status === 'tentative' ? ' tentative' : ''));
-      var color = calColor(ev.cal);
-      if (color) row.style.borderLeftColor = color;
-      row.appendChild(el('div', 'ev-time', ev.allDay ? 'ALL DAY' : fmtRange(ev)));
-      var main = el('div', 'ev-main');
-      main.appendChild(el('div', 'ev-title', ev.title));
-      if (ev.location) main.appendChild(el('div', 'ev-loc', ev.location));
-      var cn = calName(ev.cal);
-      if (cn && data.calendars.length > 1) main.appendChild(el('div', 'ev-cal', cn.toUpperCase()));
-      row.appendChild(main);
-      list.appendChild(row);
+      if (ev.allDay || ev.declined || !ev._s || !shown(ev)) continue;
+      if (ev._st <= now) continue;
+      if (ev._sk !== todayKey && ev._sk !== tomorrow) continue;
+      if (!best || ev._st < best._st) best = ev;
     }
+    if (!best) { box.appendChild(el('div', 'next-none', 'Nothing else today')); return; }
+    var isTomorrow = best._sk !== todayKey;
+    if (isTomorrow) box.appendChild(el('div', 'next-none', 'Nothing else today'));
+    box.appendChild(el('div', 'next-title', best.title));
+    var t = el('div', 'next-time');
+    if (isTomorrow) t.appendChild(el('span', 'tag', 'TOMORROW'));
+    t.appendChild(document.createTextNode(fmtRange(best)));
+    box.appendChild(t);
+    box.appendChild(el('div', 'next-in', fmtIn(best._st - now)));
   }
 
-  function renderStrip() {
-    var strip = $('strip');
-    while (strip.firstChild) strip.removeChild(strip.firstChild);
-    var sel = selectedKey || todayKey;
+  // ── bar + day buttons ──
+  function renderBar() {
+    var tabs = [['tabDay', 'day'], ['tabWeek', 'week'], ['tabMonth', 'month']];
+    for (var i = 0; i < tabs.length; i++) $(tabs[i][0]).className = 'tab' + (view === tabs[i][1] ? ' on' : '');
+    var isMonth = view === 'month';
+    $('monthPrev').className = 'btn arrow' + (isMonth ? '' : ' hide');
+    $('monthNext').className = 'btn arrow' + (isMonth ? '' : ' hide');
+    $('days').className = 'days' + (isMonth ? ' hide' : '');
+    var label = '', date = '', away = false;
+    if (view === 'day') {
+      away = selKey !== todayKey;
+      label = !away ? 'TODAY' : selKey === addDays(todayKey, 1) ? 'TOMORROW' : selKey === addDays(todayKey, -1) ? 'YESTERDAY' : WD_LONG[weekdayOf(selKey)].toUpperCase();
+      date = longDate(selKey);
+    } else if (view === 'week') {
+      var ws = weekStartOf(selKey), we = addDays(ws, 6);
+      away = ws !== weekStartOf(todayKey);
+      label = away ? 'WEEK' : 'THIS WEEK';
+      date = shortDate(ws) + ' – ' + shortDate(we) + ', ' + parseKey(we).y;
+    } else {
+      var tp = parseKey(todayKey);
+      away = monthCursor.y !== tp.y || monthCursor.m !== tp.m;
+      label = MONTHS[monthCursor.m - 1].toUpperCase();
+      date = String(monthCursor.y);
+    }
+    $('headLabel').textContent = label;
+    $('headDate').textContent = date;
+    $('todayBtn').className = 'btn gold' + (away ? '' : ' hide');
+  }
+
+  function renderDays() {
+    var box = $('days');
+    clear(box);
+    var prev = el('div', 'dnav', '‹'); prev.id = 'weekPrev'; prev.setAttribute('aria-label', 'Previous week');
+    prev.addEventListener('click', function () { stepWeek(-1); });
+    box.appendChild(prev);
+    var ws = weekStartOf(selKey);
     for (var i = 0; i < 7; i++) {
-      var key = addDays(todayKey, i);
-      var cell = el('div', 'day' + (i === 0 ? ' today' : '') + (key === sel && i !== 0 ? ' sel' : ''));
-      cell.setAttribute('data-key', key);
-      var head = el('div', 'day-head');
-      head.appendChild(el('span', 'day-name', i === 0 ? 'TODAY' : WD[weekdayOf(key)]));
-      head.appendChild(el('span', 'day-num', String(parseKey(key).d)));
-      cell.appendChild(head);
-      var box = el('div', 'day-evs');
-      var evs = data ? eventsOn(key) : [];
-      if (!evs.length) box.appendChild(el('div', 'day-none', data ? 'nothing' : ''));
-      var max = 4;
-      for (var j = 0; j < evs.length && j < max; j++) {
-        var ev = evs[j];
-        var line = el('div', 'day-ev' + (ev.declined ? ' declined' : ''));
-        var color = calColor(ev.cal);
-        if (color) line.style.borderLeftColor = color;
-        var t = timeOf(ev.start);
-        line.appendChild(el('span', 't', ev.allDay ? 'ALL' : t.hm + t.ampm.charAt(0).toLowerCase()));
-        line.appendChild(document.createTextNode(ev.title));
-        box.appendChild(line);
+      var key = addDays(ws, i);
+      var b = el('div', 'dbtn' + (S.workShade && isWork(key) ? ' work' : '') + (key === todayKey ? ' today' : '') + (view === 'day' && key === selKey ? ' sel' : ''));
+      b.setAttribute('data-key', key);
+      b.appendChild(el('span', 'wd', WD[weekdayOf(key)]));
+      b.appendChild(el('span', 'dn', String(parseKey(key).d)));
+      if (data && inWindow(key) && entriesOn(key).length) b.appendChild(el('span', 'cnt'));
+      b.addEventListener('click', onDayButton);
+      box.appendChild(b);
+    }
+    var next = el('div', 'dnav', '›'); next.id = 'weekNext'; next.setAttribute('aria-label', 'Next week');
+    next.addEventListener('click', function () { stepWeek(1); });
+    box.appendChild(next);
+  }
+  function onDayButton(e) { showDay(e.currentTarget.getAttribute('data-key')); }
+  function showDay(key) { selKey = key; view = 'day'; renderAll(); }
+  function stepWeek(n) { selKey = addDays(selKey, 7 * n); renderAll(); }
+
+  // ── time grid (DAY = one column, WEEK = seven) ──
+  function pct(min) { return ((min - S.dayStart * 60) / ((S.dayEnd - S.dayStart) * 60) * 100) + '%'; }
+  function chipFor(entry, withTime) {
+    var ev = entry.ev;
+    var c = el('div', 'chip' + (ev.declined ? ' declined' : ''));
+    var color = calColor(ev.cal);
+    c.style.borderLeftColor = color;
+    c.style.backgroundColor = rgba(color, 0.18);
+    if (withTime) c.appendChild(el('span', 'k', entry.allDay ? 'ALL DAY' : fmtRange(ev)));
+    c.appendChild(document.createTextNode(ev.title));
+    return c;
+  }
+  // Split a day's entries: chips (all-day, plus timed events wholly outside the visible hours) and blocks.
+  function splitDay(key) {
+    var lo = S.dayStart * 60, hi = S.dayEnd * 60;
+    var chips = [], blocks = [];
+    var list = entriesOn(key);
+    for (var i = 0; i < list.length; i++) {
+      var en = list[i];
+      if (en.allDay) { chips.push(en); continue; }
+      var outside = en.e === en.s ? (en.s < lo || en.s >= hi) : (en.e <= lo || en.s >= hi);
+      if (outside) { chips.push(en); continue; }
+      var vs = Math.max(en.s, lo);
+      var ve = Math.min(Math.max(en.e, vs + MIN_BLOCK), hi);
+      if (ve - vs < MIN_BLOCK) vs = Math.max(lo, ve - MIN_BLOCK);
+      blocks.push({ en: en, vs: vs, ve: ve });
+    }
+    blocks.sort(function (a, b) { return a.vs - b.vs || b.ve - a.ve; });
+    layoutLanes(blocks);
+    return { chips: chips, blocks: blocks };
+  }
+  function buildTimeline(keys, week) {
+    var tl = el('div', 'tl ' + (week ? 'week' : 'day'));
+    tl.style.setProperty('--hours', String(S.dayEnd - S.dayStart));
+    var hours = el('div', 'tl-hours');
+    var body = el('div', 'tl-body');
+    for (var h = S.dayStart; h <= S.dayEnd; h++) {
+      var lab = el('div', 'tl-hl', fmtHour(h));
+      lab.style.top = pct(h * 60);
+      hours.appendChild(lab);
+      var line = el('div', 'tl-line'); line.style.top = pct(h * 60); body.appendChild(line);
+      if (!week && h < S.dayEnd) { var half = el('div', 'tl-line half'); half.style.top = pct(h * 60 + 30); body.appendChild(half); }
+    }
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var known = !!data && inWindow(key);
+      var col = el('div', 'tl-col' + (S.workShade && isWork(key) ? ' work' : '') + (key === todayKey ? ' today' : '') + (data && !known ? ' out' : ''));
+      col.setAttribute('data-key', key);
+      if (week) col.addEventListener('click', onDayButton);
+      if (known) {
+        var blocks = splitDay(key).blocks;
+        for (var j = 0; j < blocks.length; j++) col.appendChild(blockFor(blocks[j], week));
       }
-      if (evs.length > max) box.appendChild(el('div', 'day-more', '+' + (evs.length - max) + ' MORE'));
-      cell.appendChild(box);
-      cell.addEventListener('click', onDayTap);
-      strip.appendChild(cell);
+      if (key === todayKey) { var nl = el('div', 'now-line'); col.appendChild(nl); }
+      body.appendChild(col);
+    }
+    tl.appendChild(hours);
+    tl.appendChild(body);
+    if (week) tl.appendChild(el('div', 'tl-spacer'));
+    return tl;
+  }
+  function blockFor(b, week) {
+    var ev = b.en.ev;
+    var dur = b.ve - b.vs;
+    var blk = el('div', 'ev' + (dur < 50 ? ' short' : '') + (ev.declined ? ' declined' : '') + (ev.status === 'tentative' ? ' tentative' : ''));
+    blk.style.top = pct(b.vs);
+    blk.style.height = 'calc(' + pct(b.ve) + ' - ' + pct(b.vs) + ' - 2px)';
+    var w = 100 / b.lanes;
+    blk.style.left = 'calc(' + (b.lane * w) + '% + 2px)';
+    blk.style.width = 'calc(' + w + '% - 4px)';
+    var color = calColor(ev.cal);
+    blk.style.borderLeftColor = color;
+    blk.style.backgroundColor = rgba(color, ev.declined ? 0.10 : 0.22);
+    blk.setAttribute('data-id', ev.id);
+    blk.appendChild(el('div', 'ev-t', fmtRange(ev)));
+    blk.appendChild(el('div', 'ev-n', ev.title));
+    if (!week && ev.location && dur >= 75) blk.appendChild(el('div', 'ev-l', ev.location));
+    return blk;
+  }
+  function placeNowLines(p) {
+    var lines = document.querySelectorAll('.now-line');
+    if (!lines.length) return;
+    var min = p.h * 60 + p.mi;
+    var on = min >= S.dayStart * 60 && min <= S.dayEnd * 60;
+    for (var i = 0; i < lines.length; i++) {
+      lines[i].style.display = on ? 'block' : 'none';
+      lines[i].style.top = pct(min);
     }
   }
-  function onDayTap(e) {
-    var key = e.currentTarget.getAttribute('data-key');
-    selectDay(key);
-  }
-  function selectDay(key) {
-    selectedKey = key === todayKey ? '' : key;
-    renderAgenda(); renderStrip();
-    if (monthCursor) renderMonth();
+  function message(text) { var m = el('div', 'msg'); m.appendChild(el('span', '', text)); return m; }
+
+  function renderDayView(v) {
+    var key = selKey;
+    var known = !!data && inWindow(key);
+    var split = known ? splitDay(key) : { chips: [], blocks: [] };
+    if (split.chips.length) {
+      var chips = el('div', 'chips');
+      for (var i = 0; i < split.chips.length; i++) chips.appendChild(chipFor(split.chips[i], true));
+      v.appendChild(chips);
+    }
+    var tl = buildTimeline([key], false);
+    v.appendChild(tl);
+    if (!data) tl.appendChild(message('waiting for calendar'));
+    else if (!known) tl.appendChild(message('outside the two-week calendar window'));
+    else if (!split.chips.length && !split.blocks.length) tl.appendChild(message('Nothing scheduled'));
   }
 
-  function renderMonth() {
+  function renderWeekView(v) {
+    var ws = weekStartOf(selKey);
+    var keys = [];
+    for (var i = 0; i < 7; i++) keys.push(addDays(ws, i));
+    var any = false;
+    var row = el('div', 'wk-allday');
+    row.appendChild(el('div', 'lbl', 'ALL DAY'));
+    var cells = el('div', 'cells');
+    for (var k = 0; k < 7; k++) {
+      var cell = el('div', 'cell');
+      if (data && inWindow(keys[k])) {
+        var chips = splitDay(keys[k]).chips;
+        for (var c = 0; c < chips.length && c < 2; c++) { cell.appendChild(chipFor(chips[c], !chips[c].allDay)); any = true; }
+        if (chips.length > 2) cell.appendChild(el('div', 'more', '+' + (chips.length - 2)));
+      }
+      cells.appendChild(cell);
+    }
+    row.appendChild(cells);
+    row.appendChild(el('div', 'sp'));
+    if (any) v.appendChild(row);
+    var tl = buildTimeline(keys, true);
+    v.appendChild(tl);
+    if (!data) tl.appendChild(message('waiting for calendar'));
+    else {
+      var known = 0;
+      for (var j = 0; j < 7; j++) if (inWindow(keys[j])) known++;
+      if (!known) tl.appendChild(message('outside the two-week calendar window'));
+    }
+  }
+
+  function renderMonthView(v) {
     var y = monthCursor.y, m = monthCursor.m;
-    $('monthTitle').textContent = MONTHS[m - 1].toUpperCase() + ' ' + y;
-    var grid = $('monthGrid');
-    while (grid.firstChild) grid.removeChild(grid.firstChild);
-    for (var w = 0; w < 7; w++) grid.appendChild(el('div', 'month-wd', WD[w]));
+    var head = el('div', 'mwd');
+    for (var w = 0; w < 7; w++) {
+      var wd = (S.weekStart + w) % 7;
+      head.appendChild(el('div', S.workShade && wd >= 1 && wd <= 5 ? 'work' : '', WD[wd]));
+    }
+    v.appendChild(head);
+    var grid = el('div', 'mgrid');
     var first = y + '-' + pad2(m) + '-01';
-    var lead = weekdayOf(first);
+    var start = weekStartOf(first);
     var days = new Date(Date.UTC(y, m, 0)).getUTCDate();
-    var sel = selectedKey || todayKey;
-    for (var b = 0; b < lead; b++) grid.appendChild(el('div', 'mday blank'));
-    for (var d = 1; d <= days; d++) {
-      var key = y + '-' + pad2(m) + '-' + pad2(d);
-      var cell = el('div', 'mday' + (key === todayKey ? ' today' : '') + (key === sel ? ' sel' : '') + (inWindow(key) ? '' : ' out'));
+    var last = y + '-' + pad2(m) + '-' + pad2(days);
+    var end = addDays(weekStartOf(last), 6);
+    for (var key = start; key <= end; key = addDays(key, 1)) {
+      var p = parseKey(key);
+      var known = !!data && inWindow(key);
+      var cell = el('div', 'mday' + (p.m !== m ? ' other' : '') + (S.workShade && isWork(key) ? ' work' : '') +
+        (key === todayKey ? ' today' : '') + (key === selKey ? ' sel' : '') + (data && !known ? ' out' : ''));
       cell.setAttribute('data-key', key);
-      cell.appendChild(el('div', 'n', String(d)));
-      var dots = el('div', 'dots');
-      var n = data && inWindow(key) ? Math.min(eventsOn(key).length, 3) : 0;
-      for (var k = 0; k < n; k++) dots.appendChild(el('span', 'dot'));
-      cell.appendChild(dots);
-      cell.addEventListener('click', onMonthDayTap);
+      cell.appendChild(el('div', 'n', String(p.d)));
+      if (known) {
+        var list = entriesOn(key);
+        if (list.length) {
+          var dots = el('div', 'dots');
+          for (var k = 0; k < list.length && k < 5; k++) {
+            var dot = el('span', 'dot');
+            dot.style.background = calColor(list[k].ev.cal);
+            dots.appendChild(dot);
+          }
+          dots.appendChild(el('span', 'count', String(list.length)));
+          cell.appendChild(dots);
+        }
+      }
+      cell.addEventListener('click', onDayButton);
       grid.appendChild(cell);
     }
-    var trail = (7 - ((lead + days) % 7)) % 7;
-    for (var t = 0; t < trail; t++) grid.appendChild(el('div', 'mday blank'));
+    v.appendChild(grid);
   }
-  function onMonthDayTap(e) {
-    selectDay(e.currentTarget.getAttribute('data-key'));
-    closeMonth();
+
+  function renderView() {
+    var v = $('view');
+    clear(v);
+    if (view === 'day') renderDayView(v);
+    else if (view === 'week') renderWeekView(v);
+    else renderMonthView(v);
+    placeNowLines(partsIn(new Date(), tz));
+    scrollToWork(v);
   }
-  function openMonth() {
-    var p = parseKey(selectedKey || todayKey);
-    monthCursor = { y: p.y, m: p.m };
-    renderMonth();
-    $('month').className = 'month open';
+  // Phone only (the wall fits the whole range): bring the useful hours into view.
+  function scrollToWork(v) {
+    if (view === 'month' || v.scrollHeight <= v.clientHeight + 4) return;
+    var target = -1;
+    if (selKey === todayKey) { var p = partsIn(new Date(), tz); target = p.h * 60 + p.mi - 60; }
+    else if (view === 'day') {
+      var b = data && inWindow(selKey) ? splitDay(selKey).blocks : [];
+      if (b.length) target = b[0].vs - 30;
+    }
+    if (target < 0) { v.scrollTop = 0; return; }
+    var tl = v.querySelector('.tl');
+    if (!tl) return;
+    var frac = (target - S.dayStart * 60) / ((S.dayEnd - S.dayStart) * 60);
+    v.scrollTop = Math.max(0, tl.offsetTop + frac * tl.offsetHeight - 8);
   }
-  function closeMonth() { monthCursor = null; $('month').className = 'month'; }
+
+  function renderAll() {
+    byDay = {};
+    if (!selKey) selKey = todayKey;
+    if (!monthCursor) { var p = parseKey(selKey); monthCursor = { y: p.y, m: p.m }; }
+    renderBar();
+    if (view !== 'month') renderDays();
+    renderView();
+    renderNext();
+  }
+
+  // ── navigation ──
+  function setView(v) {
+    view = v;
+    if (v === 'month') { var p = parseKey(selKey); monthCursor = { y: p.y, m: p.m }; }
+    renderAll();
+  }
   function stepMonth(n) {
     var m = monthCursor.m + n, y = monthCursor.y;
     if (m < 1) { m = 12; y--; } else if (m > 12) { m = 1; y++; }
     monthCursor = { y: y, m: m };
-    renderMonth();
+    renderAll();
+  }
+  function goToday() {
+    selKey = todayKey;
+    var p = parseKey(todayKey);
+    monthCursor = { y: p.y, m: p.m };
+    renderAll();
   }
 
-  function renderAll() { byDay = {}; renderAgenda(); renderStrip(); if (monthCursor) renderMonth(); }
+  // ── settings sheet ──
+  function seg(label, options, current, onPick, hint) {
+    var row = el('div', 'row');
+    var l = el('div', 'row-l');
+    var t = el('div', '', label);
+    if (hint) t.appendChild(el('small', '', hint));
+    l.appendChild(t);
+    row.appendChild(l);
+    var box = el('div', 'seg');
+    options.forEach(function (o) {
+      var b = el('div', o[1] === current ? 'on' : '', o[0]);
+      b.setAttribute('data-v', String(o[1]));
+      b.addEventListener('click', function () { onPick(o[1]); });
+      box.appendChild(b);
+    });
+    row.appendChild(box);
+    return row;
+  }
+  function stepper(label, id, value, onStep) {
+    var row = el('div', 'row');
+    row.appendChild(el('div', 'row-l', label));
+    var st = el('div', 'step');
+    var minus = el('div', 'btn', '−'); minus.id = id + 'Minus';
+    var v = el('div', 'v', value); v.id = id + 'Val';
+    var plus = el('div', 'btn', '+'); plus.id = id + 'Plus';
+    minus.addEventListener('click', function () { onStep(-1); });
+    plus.addEventListener('click', function () { onStep(1); });
+    st.appendChild(minus); st.appendChild(v); st.appendChild(plus);
+    row.appendChild(st);
+    return row;
+  }
+  function changed() { saveSettings(); lastMinute = ''; renderClock(); renderAll(); renderStatus(); renderSheet(); }
+  function renderSheet() {
+    var body = $('sheetBody');
+    var top = body.scrollTop;
+    clear(body);
+    body.appendChild(el('div', 'sec-label', 'CLOCK'));
+    var r1 = seg('Clock', [['24-HOUR', true], ['12-HOUR', false]], S.clock24, function (v) { S.clock24 = v; changed(); });
+    r1.id = 'setClock'; body.appendChild(r1);
+    var r2 = seg('Seconds', [['OFF', false], ['ON', true]], S.seconds, function (v) { S.seconds = v; changed(); });
+    r2.id = 'setSeconds'; body.appendChild(r2);
+    body.appendChild(el('div', 'sec-label', 'WEEK'));
+    var r3 = seg('Week starts', [['SUNDAY', 0], ['MONDAY', 1]], S.weekStart, function (v) { S.weekStart = v; changed(); });
+    r3.id = 'setWeekStart'; body.appendChild(r3);
+    var r4 = seg('Work week shading', [['ON', true], ['OFF', false]], S.workShade, function (v) { S.workShade = v; changed(); }, 'Monday to Friday');
+    r4.id = 'setWorkShade'; body.appendChild(r4);
+    body.appendChild(el('div', 'sec-label', 'DAY VIEW HOURS'));
+    body.appendChild(stepper('Starts at', 'setStart', fmtHour(S.dayStart), function (n) {
+      var v = S.dayStart + n; if (v < 0 || v >= S.dayEnd) return; S.dayStart = v; changed();
+    }));
+    body.appendChild(stepper('Ends at', 'setEnd', fmtHour(S.dayEnd), function (n) {
+      var v = S.dayEnd + n; if (v > 24 || v <= S.dayStart) return; S.dayEnd = v; changed();
+    }));
+    body.appendChild(el('div', 'sec-label', 'CALENDARS SHOWN'));
+    var cals = (data && data.calendars) || [];
+    if (!cals.length) body.appendChild(el('div', 'note', 'Calendars appear here once the calendar has loaded.'));
+    cals.forEach(function (c) {
+      var on = S.hiddenCals.indexOf(c.id) < 0;
+      var row = seg(c.name || c.id, [['ON', true], ['OFF', false]], on, function (v) {
+        var i = S.hiddenCals.indexOf(c.id);
+        if (v && i >= 0) S.hiddenCals.splice(i, 1);
+        if (!v && i < 0) S.hiddenCals.push(c.id);
+        changed();
+      });
+      row.className = 'row cal-row';
+      row.setAttribute('data-cal', c.id);
+      var sw = el('span', 'swatch'); sw.style.background = c.color || '#00d4ff';
+      row.firstChild.insertBefore(sw, row.firstChild.firstChild);
+      body.appendChild(row);
+    });
+    body.scrollTop = top;
+  }
+  function openSheet() { renderSheet(); $('sheet').className = 'sheet open'; $('sheetScrim').className = 'sheet-scrim open'; }
+  function closeSheet() { $('sheet').className = 'sheet'; $('sheetScrim').className = 'sheet-scrim'; }
 
-  // ── status ──
-  function setStatus(text, level) {
+  // ── status: kept as a kind + message so a 12/24h change re-formats the time in it ──
+  var status = { kind: 'loading', msg: '', level: '' };
+  function setStatus(kind, msg, level) { status = { kind: kind, msg: msg || '', level: level || '' }; renderStatus(); }
+  function renderStatus() {
+    var showing = lastGood ? ' · showing ' + fmtStatusTime(lastGood) : '';
+    var text = status.kind === 'ok' ? 'updated ' + fmtStatusTime(lastGood)
+      : status.kind === 'offline' ? (lastGood ? 'offline' + showing : 'offline')
+      : status.kind === 'err' ? status.msg + showing
+      : status.kind === 'pass' ? 'passphrase needed · tap here'
+      : 'loading…';
     var s = $('status');
     s.textContent = text;
-    s.className = 'status' + (level ? ' ' + level : '');
+    s.className = 'status' + (status.level ? ' ' + status.level : '');
   }
 
   // ── passphrase: same key and prompt as index.html ──
@@ -635,7 +1192,7 @@
         if (r.status === 401) {
           try { localStorage.removeItem('dexterPass'); } catch (e) {}
           if (!retried && askPass()) return load(true);
-          setStatus('passphrase needed · tap here', 'warn');
+          setStatus('pass', '', 'warn');
           loading = false;
           return;
         }
@@ -643,22 +1200,24 @@
           loading = false;
           if (!r.ok) {
             var msg = d && d.error ? d.error : 'calendar unavailable';
-            setStatus(msg + (lastGood ? ' · showing ' + fmtStatusTime(lastGood) : ''), r.status === 503 ? 'warn' : 'bad');
+            setStatus('err', msg, r.status === 503 ? 'warn' : 'bad');
             return;
           }
-          data = d;
-          lastGood = new Date();
           tz = d.tz || DEFAULT_TZ;
           partFmt = {};
+          prepData(d);
+          data = d;
+          lastGood = new Date();
           var key = dayKey(lastGood);
-          if (key !== todayKey) { todayKey = key; selectedKey = ''; }
+          if (key !== todayKey) { todayKey = key; selKey = key; monthCursor = null; }
           renderAll();
-          setStatus('updated ' + fmtStatusTime(lastGood));
+          if ($('sheet').className.indexOf('open') >= 0) renderSheet();
+          setStatus('ok');
         });
       })
       .catch(function () {
         loading = false;
-        setStatus(lastGood ? 'offline · showing ' + fmtStatusTime(lastGood) : 'offline', 'warn');
+        setStatus('offline', '', 'warn');
       });
   }
 
@@ -674,20 +1233,101 @@
     $('scrim').className = 'scrim';
   }
 
+  // ── face: the idle loop from index.html, same fallback chain ──
+  //   video  : <video> playing avatar-idle.webm (muted, looping, inline)
+  //   webp   : <img> showing avatar-idle.webp when the WebView refuses muted autoplay, cannot decode VP9, or errors
+  //   static : <img> showing avatar.png for prefers-reduced-motion or if the .webp fails to load
+  var FACE = { mode: 'static', state: 'idle', ready: false, retryArmed: false, retried: false };
+  function faceReduced() {
+    try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { return false; }
+  }
+  function setFaceMode(mode) {
+    FACE.mode = mode;
+    var cl = document.body.classList;
+    cl.remove('face-mode-video'); cl.remove('face-mode-webp'); cl.remove('face-mode-static');
+    cl.add('face-mode-' + mode);
+    if (mode !== 'video') {
+      var v = $('faceVideo');
+      try { v.pause(); } catch (e) {}
+      v.removeAttribute('src');
+      try { v.load(); } catch (e) {}
+    }
+    faceApply();
+  }
+  function faceApply() {
+    if (!FACE.ready) return;
+    var name = FACE.state;
+    if (FACE.mode === 'video') {
+      var v = $('faceVideo');
+      var src = 'avatar-' + name + '.webm';
+      if (v.getAttribute('src') !== src) v.setAttribute('src', src);
+      var p;
+      try { p = v.play(); } catch (e) { p = Promise.reject(e); }
+      if (p && p.catch) p.catch(function (err) {
+        if (err && err.name === 'AbortError') return;          // src swapped mid-play: not a policy refusal
+        if (FACE.mode !== 'video') return;
+        setFaceMode('webp');                                   // autoplay refused / not supported: animated WebP
+        if (err && err.name === 'NotAllowedError' && !FACE.retryArmed) {
+          FACE.retryArmed = true;                              // refused before any touch: retry once after the first gesture
+          document.addEventListener('click', faceRetryVideo, { capture: true, once: true });
+          document.addEventListener('keydown', faceRetryVideo, { capture: true, once: true });
+        }
+      });
+    } else {
+      var isrc = FACE.mode === 'webp' ? 'avatar-' + name + '.webp' : 'avatar.png';
+      var img = $('faceImg');
+      if (img.getAttribute('src') !== isrc) img.setAttribute('src', isrc);
+    }
+  }
+  function faceRetryVideo() {
+    if (FACE.retried || FACE.mode !== 'webp') return;
+    FACE.retried = true;
+    var v = $('faceVideo');
+    v.setAttribute('src', 'avatar-' + FACE.state + '.webm');
+    var p;
+    try { p = v.play(); } catch (e) { return; }
+    if (p && p.then) p.then(function () { if (FACE.mode === 'webp') setFaceMode('video'); },
+                            function () { try { v.removeAttribute('src'); v.load(); } catch (e) {} });   // still refused: stay on WebP
+  }
+  function faceImgError() {
+    var img = $('faceImg');
+    if ((img.getAttribute('src') || '') === 'avatar.png') { img.style.visibility = 'hidden'; return; }
+    if (FACE.mode !== 'static') setFaceMode('static');
+  }
+  function faceInit() {
+    FACE.ready = true;
+    $('faceImg').addEventListener('error', faceImgError);
+    if (faceReduced()) { setFaceMode('static'); return; }
+    var probe = document.createElement('video');
+    var vp9 = probe.canPlayType && probe.canPlayType('video/webm; codecs="vp9"');
+    if (!vp9) { setFaceMode('webp'); return; }
+    $('faceVideo').addEventListener('error', function () { if (FACE.mode === 'video') setFaceMode('webp'); });
+    setFaceMode('video');
+    try {
+      var mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+      var onChange = function () { setFaceMode(mq.matches ? 'static' : 'video'); };
+      if (mq.addEventListener) mq.addEventListener('change', onChange); else if (mq.addListener) mq.addListener(onChange);
+    } catch (e) {}
+  }
+
   // ── wire up ──
-  $('monthBtn').addEventListener('click', openMonth);
-  $('monthBtnM').addEventListener('click', openMonth);
-  $('monthClose').addEventListener('click', closeMonth);
-  $('monthPrev').addEventListener('click', function () { stepMonth(-1); });
-  $('monthNext').addEventListener('click', function () { stepMonth(1); });
-  $('dexterBtn').addEventListener('click', openDrawer);
-  $('dexterBtnM').addEventListener('click', openDrawer);
+  $('face').addEventListener('click', openDrawer);
   $('drawerClose').addEventListener('click', closeDrawer);
   $('scrim').addEventListener('click', closeDrawer);
-  $('agendaBack').addEventListener('click', function () { selectDay(todayKey); });
+  $('gearBtn').addEventListener('click', openSheet);
+  $('sheetDone').addEventListener('click', closeSheet);
+  $('sheetScrim').addEventListener('click', closeSheet);
+  $('tabDay').addEventListener('click', function () { setView('day'); });
+  $('tabWeek').addEventListener('click', function () { setView('week'); });
+  $('tabMonth').addEventListener('click', function () { setView('month'); });
+  $('monthPrev').addEventListener('click', function () { stepMonth(-1); });
+  $('monthNext').addEventListener('click', function () { stepMonth(1); });
+  $('todayBtn').addEventListener('click', goToday);
   $('status').addEventListener('click', function () { if (!storedPass() && askPass()) load(); });
 
+  faceInit();
   todayKey = dayKey(new Date());
+  selKey = todayKey;
   renderClock();
   renderAll();
   if (!storedPass()) askPass();
@@ -699,5 +1339,6 @@
   });
 })();
 </script>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
 </body>
 </html>
