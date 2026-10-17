@@ -930,10 +930,9 @@ function scrollChat() {
 }
 
 // TTS
-function speak(text, native) {
-  // No Web Speech here (wall-calendar WebView): the voice comes from /api/tts instead. See "Server voice".
-  if (!native) { try { if (speakServer(text)) return; } catch (e) {} }
-  if (!window.speechSynthesis) return;
+function speak(text) {
+  // No speechSynthesis here (wall-calendar WebView): the voice comes from /api/tts instead. See "Server voice".
+  if (!window.speechSynthesis) { try { speakServer(text); } catch (e) {} return; }
   window.speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 0.92; u.pitch = 0.8; u.volume = 1;
@@ -1039,10 +1038,11 @@ function stopVoice() {
 }
 
 // ── Server voice ──
-// For browsers with no Web Speech (the wall-calendar WebView). Speech out: the reply goes to /api/tts a few
-// sentences at a time and plays through one shared <audio>. Speech in: MediaRecorder, then /api/stt.
-// Nothing here runs where Web Speech works, so phone and Mac behave exactly as before. If any of it fails,
-// typed chat carries on and a one-line status says why.
+// For browsers with no Web Speech (the wall-calendar WebView). Speech out takes over when there is no
+// speechSynthesis: the reply goes to /api/tts a few sentences at a time and plays through one shared <audio>.
+// Speech in takes over when there is no SpeechRecognition: MediaRecorder, then /api/stt. Each is decided on its
+// own, and nothing here runs where the browser has its own, so phone and Mac behave exactly as before.
+// If any of it fails, typed chat carries on and a one-line status says why.
 const sv = { audio: null, armed: false, tapped: false, unlocked: false, unlocking: false, off: false, active: false, gen: 0, ctl: null, end: null };
 const rec = { state: 'idle', mr: null, stream: null, chunks: [], timer: 0, ph: '' };  // idle | starting | recording | sending
 try { sv.off = localStorage.getItem('dexterVoiceOff') === '1'; } catch (e) {}
@@ -1051,13 +1051,6 @@ const SILENT = 'data:audio/wav;base64,UklGRrQBAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAA
 const UNLOCK_EVENTS = ['click', 'keydown'];   // pointerdown and touchstart do not count as a gesture for audio
 
 function vnote(msg) { addSys('// VOICE: ' + String(msg).replace(/[<>&]/g, '')); }   // addSys sets innerHTML, so no markup gets through
-
-// No usable Web Speech voice: there is no speechSynthesis, or it still has zero voices after the page has had
-// 3 s to load them. Checked on every reply, so a late voice load hands straight back to the browser's own voice.
-function serverTts() {
-  const s = window.speechSynthesis;
-  return !s || (s.getVoices().length === 0 && performance.now() > 3000);
-}
 
 function svAudio() { return sv.audio || (sv.audio = new Audio()); }
 
@@ -1114,36 +1107,30 @@ function stopServerSpeech() {
   svIdle();
 }
 
-// true = handled here (spoken, or deliberately silent); false = let speak() carry on with the browser's voice.
+// Speaks the reply with /api/tts. speak() only calls this when the browser has no speechSynthesis.
 function speakServer(text) {
-  const muted = sv.armed && sv.off;                    // the voice button only exists once armed
-  if (!muted && !serverTts()) return false;
   armServerVoice();
   // Muted, recording, or nobody has touched the page yet (which also skips the automatic boot greeting): stay quiet.
-  if (muted || rec.state === 'recording' || !sv.tapped) {
-    svIdle();
-    return muted || rec.state === 'recording' || !window.speechSynthesis;
-  }
+  if (sv.off || rec.state === 'recording' || !sv.tapped) { svIdle(); return; }
   stopServerSpeech();
   const parts = ttsChunks(text);
-  if (!parts.length) { svIdle(); return true; }
+  if (!parts.length) { svIdle(); return; }
   const gen = ++sv.gen, ctl = sv.ctl = new AbortController(), st = { err: '' };
   sv.active = true;
   const jobs = parts.map(p => fetchTts(p, ctl).catch(e => {
     st.err = st.err || (e && e.name === 'AbortError' ? 'voice server timed out' : e && e.message) || '';
     return null;
   }));
-  playQueue(jobs, gen, text, st).catch(() => { if (gen === sv.gen) svFail(text, '', false); });
-  return true;
+  playQueue(jobs, gen, st).catch(() => { if (gen === sv.gen) svFail(''); });
 }
 
 // Plays the clips in order; all are requested up front, so the next is usually ready when one ends.
-async function playQueue(jobs, gen, text, st) {
+async function playQueue(jobs, gen, st) {
   const a = svAudio();
   for (let i = 0; i < jobs.length; i++) {
     const blob = await jobs[i];
     if (gen !== sv.gen) return;                        // stopped or replaced while waiting
-    if (!blob) return svFail(text, st.err, i > 0);
+    if (!blob) return svFail(st.err);
     const url = URL.createObjectURL(blob);
     let how;
     try { how = await playClip(a, url); } finally { URL.revokeObjectURL(url); }
@@ -1151,9 +1138,9 @@ async function playQueue(jobs, gen, text, st) {
     if (how === 'blocked') {                           // autoplay refused: unlock again on the next tap
       sv.unlocked = sv.tapped = false;
       UNLOCK_EVENTS.forEach(ev => document.addEventListener(ev, unlockAudio, true));
-      return svFail(text, 'tap the screen once, then ask again', i > 0);
+      return svFail('tap the screen once, then ask again');
     }
-    if (how !== 'ended') return svFail(text, 'could not play the audio', i > 0);
+    if (how !== 'ended') return svFail('could not play the audio');
   }
   svIdle();
 }
@@ -1171,11 +1158,10 @@ function playClip(a, url) {
   });
 }
 
-// Say why in one line; use the browser's own voice if it has one and nothing has been said yet.
-function svFail(text, err, spoke) {
+// Say why in one line; the reply is already on screen as text.
+function svFail(err) {
   svIdle();
   vnote((err || 'speech unavailable') + ' (text only)');
-  if (!spoke && window.speechSynthesis) speak(text, true);
 }
 
 // Sentences, with short ones (Dr., G.E.E.K.) joined to the next until a piece is 60+ characters. The reply is

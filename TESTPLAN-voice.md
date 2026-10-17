@@ -70,7 +70,7 @@ curl -sS -X POST "$BASE/api/stt" -H "X-Dexter-Passphrase: $PASS" -F "audio=@/tmp
 Open the site in Chrome, DevTools > Network, filter `api`, hard reload (twice, per section 0).
 
 - [ ] The page looks the same as before: **no speaker button** beside MIC; sidebar still reads `VOICE ON` (static).
-- [ ] Console: no errors on load. `speechSynthesis.getVoices().length` is above 0 (if it is 0, the server voice takes over after 3 s, which is not the Mac's normal state).
+- [ ] Console: no errors on load. `typeof speechSynthesis` is `"object"`. The server voice switches on only where it is `"undefined"` (the calendar), never because the voice list is empty or slow to load.
 - [ ] Type a command and press Enter: the reply is spoken by Chrome's own voice, the same voice as before.
 - [ ] Network shows `/api/chat` only. **No `/api/tts` and no `/api/stt`** at any point.
 - [ ] Click MIC and speak: Chrome's recognition fills the field and sends it, as before. Still no `/api/stt`.
