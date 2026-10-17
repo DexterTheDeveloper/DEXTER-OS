@@ -138,7 +138,7 @@ Nothing secret goes in the repo. Use `wrangler secret put`.
 
 - [ ] `npx wrangler deploy` from `mcp/` succeeds; the endpoint is `https://<worker>.workers.dev/mcp`
 - [ ] Unauthenticated requests get 401; any identity other than `ALLOWED_EMAIL` gets 403
-- [ ] Claude custom connector and ChatGPT developer mode both connect and list all 7 tools
+- [ ] Claude custom connector and ChatGPT developer mode both connect and list all 8 tools
 - [ ] `dexter_memory_propose` can only create files under `/inbox/`
 - [ ] Reminders fire within 2 minutes of `due_at` and never twice; failed sends retry up to 3 times, then go to `failed`
 - [ ] p95 under 500 ms for `dexter_status`, `dexter_log` and `dexter_remind` (`mcp/scripts/latency.ts`, 50 calls each)

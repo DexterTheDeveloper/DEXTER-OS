@@ -6,8 +6,8 @@ DEXTER's memory and tools as one remote MCP server on Cloudflare Workers. Claude
 
 1. **Create the Worker from this repo.** Workers & Pages → **Create** → **Import a repository** → pick `dexter-os` → set **Root directory** to `mcp` → **Deploy**. The database (D1) and key-value store (KV) are created on the first deploy. Every push to `main` redeploys.
 2. **Add two secrets.** Open the new `dexter-mcp` Worker → **Settings** → **Variables and Secrets** → **Add**, type **Secret**:
-   - `ANTHROPIC_API_KEY`: your Anthropic key
-   - `DEXTER_PASSPHRASE`: the same passphrase you set on the dexter-os Pages project (12+ characters)
+   - `ANTHROPIC_API_KEY`: a workspace-scoped key created for this Worker, not the Pages project's key, so either one can be revoked on its own
+   - `DEXTER_PASSPHRASE`: a passphrase of its own, four or more random words (12+ characters). Never the dexter-os Pages passphrase: the PWA keeps that one in plain text in the browser storage of every device that has opened the site
 3. **Check it.** Open `https://dexter-mcp.<your-subdomain>.workers.dev`. It should say **Online**. If it lists missing secrets, add those.
 4. **Connect Claude.** claude.ai → **Settings** → **Connectors** → **Add custom connector** → URL `https://dexter-mcp.<your-subdomain>.workers.dev/mcp` → **Connect** → enter the passphrase → **Allow**.
 5. **Turn on reminder pushes.** Ask Claude for "DEXTER status". It shows a private ntfy topic; subscribe to it in the ntfy app.
@@ -33,7 +33,7 @@ ChatGPT works the same way: Settings → Apps → Advanced settings → turn on 
 | Piece | Detail |
 |---|---|
 | MCP endpoint | `/mcp`, stateless, `createMcpHandler` from `agents/mcp/server` with `@modelcontextprotocol/server` v2. Serves 2026-07-28 clients and 2025-era clients (Alexa+) |
-| Sign-in | OAuth 2.1 via `@cloudflare/workers-oauth-provider` (dynamic registration and Client ID Metadata Documents). The consent page asks for `DEXTER_PASSPHRASE`; 5 wrong tries locks that IP out for 15 minutes |
+| Sign-in | OAuth 2.1 via `@cloudflare/workers-oauth-provider` (dynamic registration and Client ID Metadata Documents). The consent page asks for `DEXTER_PASSPHRASE`; 5 wrong tries lock that IP out for 15 minutes, which only slows guessing. The passphrase's strength is the real gate |
 | Memory | Two Claude Managed Agents memory stores, created on first use: **DEXTER Memory** (read, propose, STATE.md) and **DEXTER Reference** (read only). Every change is versioned |
 | Log and reminders | D1 database `dexter`; tables are created on first use (`schema.sql` mirrors them) |
 | Reminder delivery | Cron every minute, push via ntfy. Each reminder is claimed before sending so it can't go out twice; 3 failures marks it failed |

@@ -33,7 +33,7 @@ This is a single-operator tool. Without a gate, anyone with the URL could spend 
 2. Type **Secret**, name `DEXTER_PASSPHRASE`, value: a phrase you make up, 12+ characters (four random words works)
 3. Redeploy (or push a commit)
 
-The first time you chat, DEXTER asks for the passphrase and remembers it on that device. Use the same passphrase for the DEXTER MCP server (`mcp/README.md`).
+The first time you chat, DEXTER asks for the passphrase and remembers it on that device, in plain text in the browser's storage. Give the DEXTER MCP server (`mcp/README.md`) a different passphrase for that reason.
 
 Optional, stronger: put Cloudflare Access in front of the whole site (Zero Trust → Access → Applications → Self-hosted, domain = your `*.pages.dev` address, policy = your email). The passphrase still applies on top.
 
