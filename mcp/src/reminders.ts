@@ -42,11 +42,14 @@ export async function deliverDueReminders(env: Env, now: Date = new Date()): Pro
 	await ensureSchema(db);
 	const nowIso = now.toISOString();
 
-	// A run that died mid-send leaves a row in 'sending'; put it back in line.
+	// A run that died mid-send leaves a row in 'sending'; put it back in line once its claim is
+	// old. Keyed on when it was claimed, not on due_at: an overdue reminder that another run is
+	// sending right now must not be handed out a second time. (Rows claimed before claimed_at
+	// existed have NULL there and count as stuck.)
 	await db
 		.prepare(
 			`UPDATE reminders SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'pending' END
-			 WHERE status = 'sending' AND due_at <= ?`,
+			 WHERE status = 'sending' AND (claimed_at IS NULL OR claimed_at <= ?)`,
 		)
 		.bind(MAX_ATTEMPTS, new Date(now.getTime() - STUCK_AFTER_MS).toISOString())
 		.run();
@@ -60,8 +63,10 @@ export async function deliverDueReminders(env: Env, now: Date = new Date()): Pro
 	let failed = 0;
 	for (const reminder of results) {
 		const claim = await db
-			.prepare(`UPDATE reminders SET status = 'sending', attempts = attempts + 1 WHERE id = ? AND status = 'pending'`)
-			.bind(reminder.id)
+			.prepare(
+				`UPDATE reminders SET status = 'sending', attempts = attempts + 1, claimed_at = ? WHERE id = ? AND status = 'pending'`,
+			)
+			.bind(nowIso, reminder.id)
 			.run();
 		if (claim.meta.changes !== 1) continue;
 

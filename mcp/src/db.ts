@@ -4,21 +4,34 @@ import { shortId } from "./util";
 // schema.sql mirrors these statements for reference.
 const SCHEMA = [
 	`CREATE TABLE IF NOT EXISTS log (id TEXT PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, source TEXT, created_at TEXT NOT NULL)`,
-	`CREATE TABLE IF NOT EXISTS reminders (id TEXT PRIMARY KEY, text TEXT NOT NULL, due_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, source TEXT, created_at TEXT NOT NULL, sent_at TEXT)`,
+	`CREATE TABLE IF NOT EXISTS reminders (id TEXT PRIMARY KEY, text TEXT NOT NULL, due_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, source TEXT, created_at TEXT NOT NULL, sent_at TEXT, claimed_at TEXT)`,
 	`CREATE INDEX IF NOT EXISTS reminders_due ON reminders (status, due_at)`,
 	`CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 ];
 
+// Columns added after the first deploy. CREATE TABLE IF NOT EXISTS leaves an existing table alone,
+// so each is added here when missing (SQLite has no ADD COLUMN IF NOT EXISTS).
+const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
+	{ table: "reminders", column: "claimed_at", definition: "TEXT" },
+];
+
 let schemaReady: Promise<void> | undefined;
 
+async function applySchema(db: D1Database): Promise<void> {
+	await db.batch(SCHEMA.map((statement) => db.prepare(statement)));
+	for (const { table, column, definition } of ADDED_COLUMNS) {
+		const { results } = await db.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+		if (!results.some((existing) => existing.name === column)) {
+			await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+		}
+	}
+}
+
 export function ensureSchema(db: D1Database): Promise<void> {
-	schemaReady ??= db
-		.batch(SCHEMA.map((statement) => db.prepare(statement)))
-		.then(() => undefined)
-		.catch((error) => {
-			schemaReady = undefined;
-			throw error;
-		});
+	schemaReady ??= applySchema(db).catch((error) => {
+		schemaReady = undefined;
+		throw error;
+	});
 	return schemaReady;
 }
 
@@ -49,6 +62,8 @@ export interface ReminderRow {
 	source: string | null;
 	created_at: string;
 	sent_at: string | null;
+	/** When a delivery run claimed the row; the stuck-row reset is keyed on this, not on due_at. */
+	claimed_at: string | null;
 }
 
 export async function getConfig(db: D1Database, key: string): Promise<string | null> {
@@ -110,6 +125,7 @@ export async function addReminder(
 		source: entry.source,
 		created_at: new Date().toISOString(),
 		sent_at: null,
+		claimed_at: null,
 	};
 	await db
 		.prepare(

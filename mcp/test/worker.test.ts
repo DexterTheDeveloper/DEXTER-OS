@@ -1,7 +1,7 @@
 import { createExecutionContext, env, SELF, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleAuthRequest } from "../src/access";
-import { resetSchemaCache } from "../src/db";
+import { ensureSchema, resetSchemaCache } from "../src/db";
 import worker, { mcpApiHandler } from "../src/index";
 import { deliverDueReminders } from "../src/reminders";
 import { TOOL_NAMES } from "../src/server";
@@ -306,6 +306,47 @@ describe("reminder delivery", () => {
 
 		const status = await callTool("dexter_status");
 		expect(status.text).not.toContain("push configured");
+	});
+
+	it("leaves an overdue reminder alone while another run is still sending it", async () => {
+		const due = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+		const id = (await callTool("dexter_remind", { text: "Overdue", due_at: due })).text.match(/rem_[0-9a-f]{8}/)![0];
+		// 15 minutes past due, and claimed by another run one minute ago.
+		const now = new Date(Date.now() + 17 * 60 * 1000);
+		const minutesAgo = (n: number) => new Date(now.getTime() - n * 60 * 1000).toISOString();
+		await env.DB.prepare(`UPDATE reminders SET status = 'sending', attempts = 1, claimed_at = ? WHERE id = ?`)
+			.bind(minutesAgo(1), id)
+			.run();
+
+		expect(await deliverDueReminders(env, now)).toEqual({ sent: 0, failed: 0 });
+		const untouched = await env.DB.prepare(`SELECT status, attempts FROM reminders WHERE id = ?`).bind(id).first();
+		expect(untouched).toEqual({ status: "sending", attempts: 1 });
+
+		// Once the claim itself is older than 10 minutes the row is put back in line and sent once.
+		await env.DB.prepare(`UPDATE reminders SET claimed_at = ? WHERE id = ?`).bind(minutesAgo(11), id).run();
+		expect(await deliverDueReminders(env, now)).toEqual({ sent: 1, failed: 0 });
+		const pushes = fetchSpy.mock.calls.filter(([input]: unknown[]) => String(input).startsWith("https://ntfy.sh/"));
+		expect(pushes).toHaveLength(1);
+	});
+
+	it("treats a 'sending' row from before claimed_at existed as stuck", async () => {
+		const due = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+		const id = (await callTool("dexter_remind", { text: "Legacy", due_at: due })).text.match(/rem_[0-9a-f]{8}/)![0];
+		await env.DB.prepare(`UPDATE reminders SET status = 'sending', attempts = 1, claimed_at = NULL WHERE id = ?`).bind(id).run();
+		expect(await deliverDueReminders(env, new Date(Date.now() + 3 * 60 * 1000))).toEqual({ sent: 1, failed: 0 });
+	});
+
+	it("adds claimed_at to a reminders table created before the column existed", async () => {
+		await env.DB.prepare(`DROP TABLE IF EXISTS reminders`).run();
+		await env.DB.prepare(
+			`CREATE TABLE reminders (id TEXT PRIMARY KEY, text TEXT NOT NULL, due_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, source TEXT, created_at TEXT NOT NULL, sent_at TEXT)`,
+		).run();
+		for (let pass = 1; pass <= 2; pass++) {
+			resetSchemaCache();
+			await ensureSchema(env.DB);
+			const { results } = await env.DB.prepare(`PRAGMA table_info(reminders)`).all<{ name: string }>();
+			expect(results.map((c) => c.name), `pass ${pass}`).toContain("claimed_at");
+		}
 	});
 
 	it("marks a reminder failed after three failed sends", async () => {
