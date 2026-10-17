@@ -11,7 +11,7 @@ const ORIGIN = "https://dexter-mcp.example.workers.dev";
 type Json = Record<string, any>;
 
 /** Calls the MCP endpoint the way an authenticated client would, past the OAuth layer. */
-async function rpc(method: string, params: Json = {}, props: Json = {}): Promise<Json> {
+async function rpc(method: string, params: Json = {}, props: Json = {}, custom: Partial<Env> = {}): Promise<Json> {
 	const ctx = createExecutionContext() as ExecutionContext & { props?: Json };
 	ctx.props = { operator: true, email: "", name: "Operator", sub: "operator", client: "Claude", ...props };
 	const request = new Request(`${ORIGIN}/mcp`, {
@@ -24,7 +24,7 @@ async function rpc(method: string, params: Json = {}, props: Json = {}): Promise
 		},
 		body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
 	});
-	const response = await mcpApiHandler.fetch(request, env, ctx);
+	const response = await mcpApiHandler.fetch(request, { ...env, ...custom } as Env, ctx);
 	await waitOnExecutionContext(ctx);
 	const text = await response.text();
 	if (response.headers.get("content-type")?.includes("text/event-stream")) {
@@ -38,8 +38,8 @@ async function rpc(method: string, params: Json = {}, props: Json = {}): Promise
 	return { status: response.status, ...(text ? JSON.parse(text) : {}) };
 }
 
-async function callTool(name: string, args: Json = {}): Promise<{ text: string; isError: boolean }> {
-	const result = await rpc("tools/call", { name, arguments: args });
+async function callTool(name: string, args: Json = {}, custom: Partial<Env> = {}): Promise<{ text: string; isError: boolean }> {
+	const result = await rpc("tools/call", { name, arguments: args }, {}, custom);
 	expect(result.error, JSON.stringify(result.error)).toBeUndefined();
 	return {
 		text: (result.result?.content ?? []).map((c: Json) => c.text).join("\n"),
@@ -222,7 +222,21 @@ describe("tools", () => {
 		const status = await callTool("dexter_status");
 		expect(status.text).toContain("workout · 5AM run, 3 miles");
 		expect(status.text).toContain("STATE.md: not saved yet");
-		expect(status.text).toContain('ntfy topic "dexter-test-topic"');
+		expect(status.text).toContain("push configured, not yet confirmed");
+		expect(status.text).not.toContain("dexter-test-topic");
+	});
+
+	it("generates the ntfy topic on first status but never shows it to an assistant", async () => {
+		const noPinnedTopic = { NTFY_TOPIC: undefined };
+		const status = await callTool("dexter_status", {}, noPinnedTopic);
+		const row = await env.DB.prepare(`SELECT value FROM config WHERE key = 'ntfy_topic'`).first<{ value: string }>();
+		expect(row?.value).toMatch(/^dexter-[0-9a-f]{32}$/);
+		expect(status.text).toContain("push configured");
+		expect(status.text).not.toContain(row!.value);
+		expect(status.text).not.toContain(row!.value.slice("dexter-".length));
+
+		const listing = await rpc("tools/list", {}, {}, noPinnedTopic);
+		expect(JSON.stringify(listing)).not.toContain(row!.value);
 	});
 
 	it("sets, lists and cancels reminders", async () => {
@@ -291,7 +305,7 @@ describe("reminder delivery", () => {
 		expect(String(pushes[0][0])).toBe("https://ntfy.sh/dexter-test-topic");
 
 		const status = await callTool("dexter_status");
-		expect(status.text).not.toContain("ntfy topic");
+		expect(status.text).not.toContain("push configured");
 	});
 
 	it("marks a reminder failed after three failed sends", async () => {

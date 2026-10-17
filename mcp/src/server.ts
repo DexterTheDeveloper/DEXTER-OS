@@ -124,9 +124,13 @@ export function buildServer(env: Env, caller: Caller): McpServer {
 			for (const entry of log) lines.push(`- ${formatLocal(entry.created_at, tz)} · ${entry.kind} · ${entry.text}`);
 
 			if (!(await getConfig(env.DB, "push_confirmed"))) {
+				// Generate and store the topic now so the operator can look it up before the first
+				// reminder, but never print it: anyone holding the name can push to the phone, and
+				// this text lands in every assistant's transcript.
+				await pushTopic(env);
 				lines.push(
 					"",
-					`Setup: reminder pushes go to the ntfy topic "${await pushTopic(env)}". Subscribe to it in the ntfy app. This line disappears after the first reminder is delivered.`,
+					"Setup: push configured, not yet confirmed. The ntfy topic is private and is not shown here; the operator reads it from the server's config table (deploy checklist, Gate 3) and subscribes to it in the ntfy app. This line disappears after the first reminder is delivered.",
 				);
 			}
 			return ok(lines.join("\n"));

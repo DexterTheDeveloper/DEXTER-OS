@@ -10,7 +10,7 @@ DEXTER's memory and tools as one remote MCP server on Cloudflare Workers. Claude
    - `DEXTER_PASSPHRASE`: a passphrase of its own, four or more random words (12+ characters). Never the dexter-os Pages passphrase: the PWA keeps that one in plain text in the browser storage of every device that has opened the site
 3. **Check it.** Open `https://dexter-mcp.<your-subdomain>.workers.dev`. It should say **Online**. If it lists missing secrets, add those.
 4. **Connect Claude.** claude.ai → **Settings** → **Connectors** → **Add custom connector** → URL `https://dexter-mcp.<your-subdomain>.workers.dev/mcp` → **Connect** → enter the passphrase → **Allow**.
-5. **Turn on reminder pushes.** Ask Claude for "DEXTER status". It shows a private ntfy topic; subscribe to it in the ntfy app.
+5. **Turn on reminder pushes.** Ask Claude for "DEXTER status" once (that generates the private ntfy topic), then read the topic yourself, from `mcp/`: `npx wrangler d1 execute dexter --remote --command "SELECT key, value FROM config WHERE key LIKE '%ntfy%'"`. Subscribe to it in the ntfy app. The topic is never shown to an assistant: anyone who knows it can push to your phone.
 6. **Load STATE.md.** In Claude: "Save this as DEXTER's STATE.md" and paste or attach the file.
 
 ChatGPT works the same way: Settings → Apps → Advanced settings → turn on **Developer mode** → **Create app** → same URL (web only).
