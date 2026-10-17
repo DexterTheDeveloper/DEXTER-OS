@@ -3,7 +3,9 @@
 Covers `functions/api/calendar.js` and `calendar.html` (served at `/calendar`). Needs the site deployed with
 the three Google secrets set **and redeployed after setting them** (`SECRETS-calendar.md`). `sw.js` is
 unchanged: `/calendar` is not in its precache, so the page always comes from the network, and `/api/*`
-already bypasses the worker.
+already bypasses the worker. The page plays `avatar-idle.webm` (falling back to `avatar-idle.webp`, then
+`avatar.png`); `sw.js` precaches all of them once the worker is installed, which happens the first time `/`
+loads (directly or through the chat drawer). The page never registers the worker itself.
 
 ## 1. curl smoke test (from the Mac)
 
@@ -44,15 +46,22 @@ unset, it is every calendar shared to DexterOS@ with reader, writer or owner acc
 ## 2. Phone or Mac browser
 
 1. Open `$BASE/calendar`. First visit asks "DEXTER passphrase" once (same prompt and storage as `/`).
-2. Big clock and date, TODAY list, 7-day strip underneath. Status line bottom-left (phone: under the date)
-   reads `updated h:mmpm`.
-3. Tap a strip day: the list switches to that day, label says TOMORROW or the weekday; tap today (or
-   BACK TO TODAY) to return. MONTH opens the grid with dots on days that have events; tap a day to show it.
-4. DEXTER slides the chat in (full width on the phone); CLOSE slides it away. Chat works without a second
-   passphrase prompt.
-5. Add an event on your phone's Google Calendar (on a calendar shared to DexterOS@); within 5 minutes it
+2. Left column: DEXTER's face, moving (the idle loop), "Tap to talk" under it; 24-hour clock, weekday and
+   date; NEXT UP card (next event today or tomorrow, "in 1h 20m"); status line `updated HH:MM`; gear at the
+   bottom. Right: DAY | WEEK | MONTH tabs (DAY first), a Sun–Sat row for this week, and today's timeline from
+   05:00 to 23:00 with a red line at the current time. Phone: face and clock in a row at the top, gear top right.
+3. Tap a day in the week row: DAY shows it (TOMORROW / the weekday); ‹ › move a week; TODAY returns.
+   WEEK: seven columns Sun–Sat, Mon–Fri slightly lighter; tap a day header → DAY for that day.
+   MONTH: weeks start Sunday, Mon–Fri shaded, dots and a count per day, ‹ › months; tap a day → DAY.
+   Days outside the feed (before yesterday, after +13 days) are hatched/dim, never shown as free.
+4. Tap the face: the chat slides in (full width on the phone); CLOSE slides it away. Chat works without a
+   second passphrase prompt.
+5. Gear → settings: switch Clock to 12-HOUR (labels become 5 AM … 11 PM), Week starts MONDAY, move DAY start
+   to 06:00, turn a calendar OFF. Reload: all four stick. They are stored per device (`dexterCalSettings`) and
+   never touch the kiosk's own settings or the passphrase.
+6. Add an event on your phone's Google Calendar (on a calendar shared to DexterOS@); within 5 minutes it
    appears and the status time moves.
-6. Turn Wi-Fi off and wait 5 minutes: the status reads `offline · showing h:mmpm`, the events stay.
+7. Turn Wi-Fi off and wait 5 minutes: the status reads `offline · showing HH:MM`, the events stay.
 
 ## 3. On the wall (DF-18T)
 
@@ -63,8 +72,12 @@ unset, it is every calendar shared to DexterOS@ with reader, writer or owner acc
    then tap "0. Launch DEXTER (kiosk)" once the Home URL is changed.
 2. First launch asks for the passphrase (on-screen keyboard). It is stored on the device; after that no typing.
 3. Stand at the wall: today's events with the right times, readable across the room, nothing cut off,
-   kiosk wrench (bottom-right) overlaps nothing important. DEXTER button is bottom-left.
-4. Tap a day, tap MONTH, tap DEXTER → chat opens, typed chat works, CLOSE returns to the calendar.
+   kiosk wrench (bottom-right) overlaps nothing important. DEXTER's face is at the top of the left column,
+   clear of the 10-tap unlock corner; the gear is bottom-left.
+   The face must be moving. If it is a still image, tap anywhere once: it should start moving (autoplay
+   retry). Still frozen after a tap = the WebView refused both the video and the animated WebP; note it.
+4. Tap a day, tap WEEK and MONTH, open the gear and close it, tap the face → chat opens, typed chat works,
+   CLOSE returns to the calendar.
 5. Power menu → Restart. The calendar comes back on its own, locked, with events (the saved passphrase survives).
 6. Leave it overnight: at midnight the TODAY column moves to the new day by itself.
 
