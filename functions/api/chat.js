@@ -8,8 +8,11 @@
 // Without the passphrase gate, anyone who finds the pages.dev URL could spend your Claude credits.
 //
 // Model: claude-opus-5-5. It runs adaptive thinking by default, so the request must not send `thinking`
-// (disabled and budget_tokens are 400s) or temperature, top_p, top_k or tool_choice. Thinking tokens
-// come out of max_tokens. Effort is stated as "medium", which is the model's default.
+// (disabled and budget_tokens are 400s) or temperature, top_p, top_k or tool_choice.
+// Effort is "low": the page sits on PROCESSING with no streaming and the system prompt caps replies at 2-4
+// sentences, so more thinking only adds seconds to every turn on a voice surface. max_tokens is 8192, a cap
+// and not spend: thinking tokens count against it, and 2048 could end in stop_reason max_tokens with no text,
+// which the page showed as "Empty reply from Claude".
 // Refusal fallback is a beta (header anthropic-beta plus body field `fallbacks`). If Anthropic changes or
 // retires it, a 400 that names it is retried once without it, so chat never breaks on a beta change.
 
@@ -88,8 +91,8 @@ function askClaude(env, mod, text, withFallbacks) {
   };
   const body = {
     model: MODEL,
-    max_tokens: 2048,
-    output_config: { effort: 'medium' },
+    max_tokens: 8192,
+    output_config: { effort: 'low' },
     system: SYS,
     messages: [{ role: 'user', content: `[MODULE: ${mod}] ${text}` }],
   };
