@@ -7,9 +7,9 @@ export default defineConfig({
 			wrangler: { configPath: "./wrangler.jsonc" },
 			miniflare: {
 				bindings: {
-					ANTHROPIC_API_KEY: "test-key",
 					DEXTER_PASSPHRASE: "correct horse battery staple",
-					NTFY_TOPIC: "dexter-test-topic",
+					// A fixed, fake test key: the bytes 0..31. Never a real secret.
+					BRIDGE_SECRET: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
 				},
 			},
 		}),

@@ -1,14 +1,18 @@
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 
-// Secrets are set in the Cloudflare dashboard (Worker > Settings > Variables and Secrets),
-// so `wrangler types` can't see them. Declared here so the code type-checks.
+// Secrets are set with `wrangler secret put` (or in the dashboard), so `wrangler types` can't see
+// them. Declared here so the code type-checks.
 declare global {
 	interface __BaseEnv_Env {
-		/** Anthropic API key. Used only for the Managed Agents memory store API. */
-		ANTHROPIC_API_KEY?: string;
-
-		/** The operator's passphrase (12+ characters). Entered once when connecting an assistant. */
+		/** The operator's passphrase (12+ characters). Entered once when connecting an app. */
 		DEXTER_PASSPHRASE?: string;
+
+		/**
+		 * Shared secret with the Mac bridge: the base64 text of 32 random bytes, generated on the Mac
+		 * by `dexter mcp secret --new`. The HMAC key is the decoded bytes. Anything that doesn't
+		 * decode to exactly 32 bytes leaves the bridge shut.
+		 */
+		BRIDGE_SECRET?: string;
 
 		/** Optional Cloudflare Access sign-in instead of the passphrase. Access for SaaS (OIDC) app: Client ID. */
 		ACCESS_CLIENT_ID?: string;
@@ -25,23 +29,12 @@ declare global {
 		ALLOWED_EMAIL?: string;
 
 		/**
-		 * Dynamic client registration (POST /register) is open only while this is unset or "true"
-		 * (any case). Any other value turns it off, a typo or "no" or "0" included, so it fails
-		 * closed. Set it to "false" as a secret (`wrangler secret put ALLOW_CLIENT_REGISTRATION`)
-		 * once every assistant is connected: a secret survives deploys, and a plain var of the same
-		 * name would collide with it. Registrations already made keep working for 90 days and renew
-		 * when they are used.
+		 * New app connections (dynamic registration at POST /register AND new sign-ins by a Client ID
+		 * Metadata Document URL) are accepted only while this is exactly "true" (any case). Unset,
+		 * or any other value, keeps them closed. Set it as a secret while connecting an app, then
+		 * delete it. Apps already connected keep working either way.
 		 */
 		ALLOW_CLIENT_REGISTRATION?: string;
-
-		/** Optional push settings. A private topic is generated when NTFY_TOPIC is unset. */
-		NTFY_TOPIC?: string;
-		NTFY_SERVER?: string;
-		NTFY_TOKEN?: string;
-
-		/** Optional pinned memory store IDs. Created and remembered automatically when unset. */
-		MEMORY_STORE_ID?: string;
-		REFERENCE_STORE_ID?: string;
 
 		/** Injected by OAuthProvider for the default handler. */
 		OAUTH_PROVIDER: OAuthHelpers;
