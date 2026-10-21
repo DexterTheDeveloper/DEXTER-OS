@@ -5,6 +5,8 @@ import {
 	type AuthRequest,
 	type ConsentDescription,
 } from "@cloudflare/workers-oauth-provider";
+import { APP_NAMES, APP_TOOLS, classifyClient } from "./clients";
+import { decodeSecret, type AppLabel } from "./protocol";
 import { base64UrlDecode, base64UrlEncode, escapeHtml, hmacHex, sameEmail, sha256Base64Url } from "./util";
 
 /**
@@ -16,6 +18,7 @@ import { base64UrlDecode, base64UrlEncode, escapeHtml, hmacHex, sameEmail, sha25
  *   to an Access sign-in instead. Access wins when both are configured.
  *
  * Consent, CSRF binding, single-use state and anti-framing come from @cloudflare/workers-oauth-provider.
+ * Every connection is read-only: the token lets an app use the relay's four read tools, nothing else.
  */
 
 export interface DexterProps extends Record<string, unknown> {
@@ -23,8 +26,17 @@ export interface DexterProps extends Record<string, unknown> {
 	email: string;
 	name: string;
 	sub: string;
+	/** The client's display name (self-declared; shown, never trusted). */
 	client: string;
+	/** claude / claude_code / chatgpt: derived from the client id and redirect URI at sign-in. */
+	app: AppLabel;
+	/** The OAuth client id, passed to the Mac for its audit log. */
+	clientId: string;
 }
+
+/** Scopes this server grants. `offline_access` only when the app asks for it (ChatGPT does). */
+export const SCOPE_READ = "dexter.read";
+export const SCOPES_SUPPORTED = [SCOPE_READ, "offline_access"];
 
 type AuthMode = "access" | "passphrase";
 
@@ -57,7 +69,9 @@ function authMode(env: Env): AuthMode | null {
 /** Plain-language list of what's still missing, for the setup page. Never includes values. */
 export function missingConfig(env: Env): string[] {
 	const missing: string[] = [];
-	if (!env.ANTHROPIC_API_KEY) missing.push("ANTHROPIC_API_KEY");
+	if (!decodeSecret(env.BRIDGE_SECRET)) {
+		missing.push(env.BRIDGE_SECRET ? "BRIDGE_SECRET (must be the 32-byte base64 value from `dexter mcp secret --new`)" : "BRIDGE_SECRET");
+	}
 	const mode = authMode(env);
 	if (!mode) {
 		missing.push(
@@ -141,21 +155,13 @@ async function recordFailure(env: Env, request: Request): Promise<void> {
 }
 
 /**
- * First layer on GET /authorize, POST /authorize and POST /register: the AUTH_RL rate limit
- * (wrangler.jsonc), keyed by client IP and shared by the three, checked before any of them writes
- * to KV. Fails closed: a missing or failing limiter refuses the request rather than letting it
- * through unmetered.
+ * The answer when a sign-in or token request is over its rate budget (src/ratelimit.ts). JSON for
+ * the endpoints apps call directly, an HTML page for the ones a person sees.
  */
-export async function authRateLimit(env: Env, request: Request): Promise<Response | null> {
-	let success: boolean;
-	try {
-		({ success } = await env.AUTH_RL.limit({ key: clientIp(request) }));
-	} catch {
-		success = false;
-	}
-	if (success) return null;
-	const headers = new Headers({ "Retry-After": "60", "Cache-Control": "no-store" });
-	if (new URL(request.url).pathname === "/register") {
+export function tooManyRequests(request: Request, retryAfter: number): Response {
+	const headers = new Headers({ "Retry-After": String(retryAfter), "Cache-Control": "no-store" });
+	const path = new URL(request.url).pathname;
+	if (path === "/register" || path === "/token" || path === "/bridge") {
 		headers.set("Content-Type", "application/json");
 		return new Response(
 			JSON.stringify({ error: "temporarily_unavailable", error_description: "Too many requests. Try again in a minute." }),
@@ -173,7 +179,7 @@ function unavailable(): Response {
 	);
 }
 
-function page(title: string, body: string, status = 200, headers = new Headers()): Response {
+export function page(title: string, body: string, status = 200, headers = new Headers()): Response {
 	headers.set("Content-Type", "text/html; charset=utf-8");
 	headers.set("Cache-Control", "no-store");
 	headers.set("X-Frame-Options", "DENY");
@@ -194,8 +200,16 @@ button.primary{background:#38e1ff;color:#0a0e14;border-color:#38e1ff;font-weight
 	);
 }
 
+const TOOL_PHRASES: Record<string, string> = {
+	dexter_ask: "ask DEXTER questions",
+	dexter_whats_live: "see what's live",
+	dexter_queue: "see what's waiting",
+	dexter_memory_search: "search its memory",
+};
+
 function consentPage(
 	details: ConsentDescription,
+	app: AppLabel,
 	handle: string,
 	headers: Headers,
 	mode: AuthMode,
@@ -216,7 +230,9 @@ function consentPage(
 			: `<p>You'll sign in with Cloudflare Access next.</p>`;
 	return page(
 		`Connect ${details.clientName} to DEXTER`,
-		`<div class="card"><p><strong>${name}</strong> wants to use DEXTER's memory, log and reminders.</p>
+		`<div class="card"><p><strong>${name}</strong> wants read-only access to DEXTER as <strong>${escapeHtml(APP_NAMES[app])}</strong>: ${escapeHtml(
+			APP_TOOLS[app].map((tool) => TOOL_PHRASES[tool]).join(", "),
+		)}. It can't change, save, approve or run anything.</p>
 <p>${origin} Access goes to <strong>${escapeHtml(details.redirectHost)}</strong>.</p>${loopback}${warning}
 <form method="post"><input type="hidden" name="handle" value="${escapeHtml(handle)}">${proof}
 <div class="row"><button name="decision" value="deny" formnovalidate>Deny</button><button class="primary" name="decision" value="approve">Allow</button></div></form></div>`,
@@ -308,19 +324,36 @@ async function exchangeCode(env: Env, request: Request, code: string, verifier: 
 	return verifyIdToken(env, body.id_token, endpoints);
 }
 
+/** The app a request belongs to, or null when DEXTER doesn't recognise it. */
+async function appFor(env: Env, authRequest: AuthRequest): Promise<{ app: AppLabel | null; clientName: string }> {
+	const client = await env.OAUTH_PROVIDER.lookupClient(authRequest.clientId);
+	const clientName = client?.clientName ?? "unknown client";
+	return { app: classifyClient(authRequest.clientId, authRequest.redirectUri, client?.clientName), clientName };
+}
+
+function unrecognisedApp(): Response {
+	return page(
+		"App not recognised",
+		`<div class="card"><p class="warn">DEXTER connects Claude, Claude Code and ChatGPT only, and this app isn't one it recognises.</p></div>`,
+		400,
+	);
+}
+
 async function issueToken(
 	env: Env,
 	authRequest: AuthRequest,
 	identity: { email: string; name: string; sub: string },
 	headers: Headers,
 ): Promise<Response> {
-	const client = await env.OAUTH_PROVIDER.lookupClient(authRequest.clientId);
-	const props: DexterProps = { operator: true, ...identity, client: client?.clientName ?? "unknown client" };
+	const { app, clientName } = await appFor(env, authRequest);
+	if (!app) return unrecognisedApp();
+	const props: DexterProps = { operator: true, ...identity, client: clientName, app, clientId: authRequest.clientId };
+	const scope = [SCOPE_READ, ...(authRequest.scope.includes("offline_access") ? ["offline_access"] : [])];
 	const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
 		request: authRequest,
 		userId: identity.sub,
-		metadata: { label: props.client },
-		scope: authRequest.scope,
+		metadata: { label: `${APP_NAMES[app]} (${clientName})` },
+		scope,
 		props,
 	});
 	headers.set("Location", redirectTo);
@@ -354,8 +387,8 @@ export async function handleAuthRequest(request: Request, env: Env, _ctx: Execut
 		return page("DEXTER MCP", `<div class="card">${status}</div>`);
 	}
 
-	// Only reached when registration is off (ALLOW_CLIENT_REGISTRATION is anything but unset or
-	// "true"): the provider isn't serving /register.
+	// Only reached when registration is off (ALLOW_CLIENT_REGISTRATION is anything but "true"):
+	// the provider isn't serving /register.
 	if (url.pathname === "/register") {
 		return Response.json(
 			{
@@ -378,6 +411,8 @@ export async function handleAuthRequest(request: Request, env: Env, _ctx: Execut
 	try {
 		if (url.pathname === "/authorize" && request.method === "GET") {
 			const authRequest = await oauth.parseAuthRequest(request);
+			const { app } = await appFor(env, authRequest);
+			if (!app) return unrecognisedApp();
 			if (mode === "access") {
 				const remember = { secret: await consentSecret(env) };
 				if (await oauth.isConsentRemembered(request, authRequest, remember)) {
@@ -386,7 +421,7 @@ export async function handleAuthRequest(request: Request, env: Env, _ctx: Execut
 			}
 			const details = await oauth.describeConsent(authRequest);
 			const consent = await oauth.beginConsent(authRequest);
-			return consentPage(details, consent.handle, consent.headers, mode ?? "passphrase");
+			return consentPage(details, app, consent.handle, consent.headers, mode ?? "passphrase");
 		}
 
 		if (url.pathname === "/authorize" && request.method === "POST") {
@@ -433,7 +468,9 @@ export async function handleAuthRequest(request: Request, env: Env, _ctx: Execut
 				// retried on this page instead of from the app.
 				const retry = await oauth.beginConsent(approved.request);
 				for (const cookie of approved.headers.getSetCookie()) retry.headers.append("Set-Cookie", cookie);
-				return consentPage(await oauth.describeConsent(approved.request), retry.handle, retry.headers, "passphrase", {
+				const { app } = await appFor(env, approved.request);
+				if (!app) return unrecognisedApp();
+				return consentPage(await oauth.describeConsent(approved.request), app, retry.handle, retry.headers, "passphrase", {
 					text: "That passphrase didn't match. Try again.",
 					status: 401,
 				});

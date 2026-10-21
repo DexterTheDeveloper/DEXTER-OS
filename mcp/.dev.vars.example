@@ -1,0 +1,11 @@
+# Copy to .dev.vars for local experiments only. Never commit .dev.vars.
+# Real values are set on the deployed Worker with `npx wrangler secret put <NAME>`.
+
+# The passphrase typed on the consent page (12+ characters, its own, never reused).
+DEXTER_PASSPHRASE=replace-with-a-long-passphrase
+
+# The bridge secret: the 32-byte base64 value `dexter mcp secret --new` prints on the Mac.
+BRIDGE_SECRET=replace-with-the-base64-value-from-the-mac
+
+# Leave unset (registration closed). Set to "true" only while connecting an app.
+# ALLOW_CLIENT_REGISTRATION=true

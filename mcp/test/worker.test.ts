@@ -1,133 +1,165 @@
+/// <reference types="@cloudflare/vitest-plugin/types" />
 import { createExecutionContext, env, SELF, waitOnExecutionContext } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleAuthRequest } from "../src/access";
-import { ensureSchema, resetSchemaCache } from "../src/db";
-import worker, { mcpApiHandler } from "../src/index";
-import { deliverDueReminders } from "../src/reminders";
+import { classifyClient } from "../src/clients";
+import { mcpApiHandler, RESOURCE } from "../src/index";
+import { AUTH_BUDGETS } from "../src/ratelimit";
 import { TOOL_NAMES } from "../src/server";
+import {
+	awayFromWindowEdge,
+	callTool,
+	connectMac,
+	ORIGIN,
+	parseMcp,
+	randomIp,
+	resetBridge,
+	rpc,
+	serve,
+	viaWorker,
+	type Json,
+} from "./helpers";
 
-const ORIGIN = "https://dexter-mcp.example.workers.dev";
+const host = new URL(ORIGIN).host;
+const OPEN = { ALLOW_CLIENT_REGISTRATION: "true" };
+const CLAUDE_REDIRECT = "https://claude.ai/api/mcp/auth_callback";
+const CHATGPT_REDIRECT = "https://chatgpt.com/connector_platform_oauth_redirect";
 
-type Json = Record<string, any>;
+/** A fresh client IP per test: the rate limiter and the lock-out counter are both keyed by it. */
+let ip = "";
+beforeEach(() => {
+	ip = randomIp();
+});
 
-/** Calls the MCP endpoint the way an authenticated client would, past the OAuth layer. */
-async function rpc(method: string, params: Json = {}, props: Json = {}, custom: Partial<Env> = {}): Promise<Json> {
-	const ctx = createExecutionContext() as ExecutionContext & { props?: Json };
-	ctx.props = { operator: true, email: "", name: "Operator", sub: "operator", client: "Claude", ...props };
-	const request = new Request(`${ORIGIN}/mcp`, {
+// The shared sign-in budget (60 a minute across all IPs) would trip over this suite's own traffic.
+// Tests share the Worker's module instance, so it is raised here and lowered again by the one test
+// that checks it.
+const GLOBAL_AUTH = AUTH_BUDGETS.find((b) => !b.perIp)!;
+const GLOBAL_AUTH_LIMIT = GLOBAL_AUTH.limit;
+beforeAll(() => {
+	GLOBAL_AUTH.limit = 100_000;
+});
+
+let fetchSpy: ReturnType<typeof vi.spyOn> | undefined;
+afterEach(() => {
+	fetchSpy?.mockRestore();
+	fetchSpy = undefined;
+});
+
+async function pkce() {
+	const verifier = "v".repeat(10) + crypto.randomUUID() + crypto.randomUUID();
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+	let binary = "";
+	for (const b of new Uint8Array(digest)) binary += String.fromCharCode(b);
+	const challenge = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+	return { verifier, challenge };
+}
+
+const cookieHeader = (response: Response) =>
+	response.headers
+		.getSetCookie()
+		.map((cookie) => cookie.split(";")[0])
+		.join("; ");
+
+async function registerClient(redirect = CLAUDE_REDIRECT, name = "Claude"): Promise<string> {
+	const registration = await viaWorker(
+		new Request(`${ORIGIN}/register`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+			body: JSON.stringify({
+				client_name: name,
+				redirect_uris: [redirect],
+				token_endpoint_auth_method: "none",
+				grant_types: ["authorization_code", "refresh_token"],
+				response_types: ["code"],
+			}),
+		}),
+		OPEN,
+	);
+	expect(registration.status).toBeLessThan(300);
+	return ((await registration.json()) as Json).client_id;
+}
+
+function authorizeUrl(params: Record<string, string>): URL {
+	const url = new URL(`${ORIGIN}/authorize`);
+	url.search = new URLSearchParams({ response_type: "code", code_challenge_method: "S256", state: "state-123", resource: RESOURCE, ...params }).toString();
+	return url;
+}
+
+async function startConsent(opts: { client_id?: string; redirect?: string; scope?: string; custom?: Partial<Env> } = {}) {
+	const redirect = opts.redirect ?? CLAUDE_REDIRECT;
+	const client_id = opts.client_id ?? (await registerClient(redirect));
+	const { verifier, challenge } = await pkce();
+	const url = authorizeUrl({ client_id, redirect_uri: redirect, code_challenge: challenge, ...(opts.scope ? { scope: opts.scope } : {}) });
+	const consent = await viaWorker(new Request(url, { redirect: "manual", headers: { "CF-Connecting-IP": ip } }), opts.custom ?? {});
+	const html = await consent.text();
+	expect(consent.status, html.slice(0, 400)).toBe(200);
+	const handle = html.match(/name="handle" value="([^"]+)"/)?.[1];
+	expect(handle).toBeTruthy();
+	return { client_id, verifier, redirect, handle: handle!, cookies: cookieHeader(consent), html };
+}
+
+function approveRequest(handle: string, cookies: string, passphrase: string, decision = "approve") {
+	return new Request(`${ORIGIN}/authorize`, {
+		method: "POST",
+		redirect: "manual",
+		headers: { "Content-Type": "application/x-www-form-urlencoded", Cookie: cookies, "CF-Connecting-IP": ip },
+		body: new URLSearchParams({ handle, decision, passphrase }).toString(),
+	});
+}
+
+const submit = (handle: string, cookies: string, passphrase: string, decision = "approve") =>
+	SELF.fetch(approveRequest(handle, cookies, passphrase, decision));
+
+function token(body: Record<string, string>, custom: Partial<Env> = {}) {
+	return viaWorker(
+		new Request(`${ORIGIN}/token`, {
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded", "CF-Connecting-IP": ip },
+			body: new URLSearchParams(body).toString(),
+		}),
+		custom,
+	);
+}
+
+/** Runs a full passphrase sign-in and returns the token response. */
+async function signIn(opts: { client_id?: string; redirect?: string; scope?: string; custom?: Partial<Env> } = {}) {
+	const consent = await startConsent(opts);
+	const approved = await submit(consent.handle, consent.cookies, "correct horse battery staple");
+	expect(approved.status).toBe(302);
+	const location = new URL(approved.headers.get("Location")!);
+	const code = location.searchParams.get("code")!;
+	const response = await token(
+		{ grant_type: "authorization_code", code, redirect_uri: consent.redirect, client_id: consent.client_id, code_verifier: consent.verifier, resource: RESOURCE },
+		opts.custom,
+	);
+	expect(response.status).toBe(200);
+	return { client_id: consent.client_id, location, tokens: (await response.json()) as Json };
+}
+
+function mcpWithToken(accessToken: string, method = "tools/list") {
+	return SELF.fetch(`${ORIGIN}/mcp`, {
 		method: "POST",
 		headers: {
+			Authorization: `Bearer ${accessToken}`,
 			"Content-Type": "application/json",
 			Accept: "application/json, text/event-stream",
 			"MCP-Protocol-Version": "2025-11-25",
-			Host: new URL(ORIGIN).host,
 		},
-		body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+		body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: {} }),
 	});
-	const response = await mcpApiHandler.fetch(request, { ...env, ...custom } as Env, ctx);
-	await waitOnExecutionContext(ctx);
-	const text = await response.text();
-	if (response.headers.get("content-type")?.includes("text/event-stream")) {
-		const data = text
-			.split("\n")
-			.filter((line) => line.startsWith("data:"))
-			.map((line) => line.slice(5).trim())
-			.pop();
-		return JSON.parse(data ?? "{}");
-	}
-	return { status: response.status, ...(text ? JSON.parse(text) : {}) };
 }
 
-async function callTool(name: string, args: Json = {}, custom: Partial<Env> = {}): Promise<{ text: string; isError: boolean }> {
-	const result = await rpc("tools/call", { name, arguments: args }, {}, custom);
-	expect(result.error, JSON.stringify(result.error)).toBeUndefined();
-	return {
-		text: (result.result?.content ?? []).map((c: Json) => c.text).join("\n"),
-		isError: Boolean(result.result?.isError),
-	};
-}
-
-// A tiny in-memory stand-in for the Managed Agents memory store API.
-function memoryApiStub() {
-	const stores: Json[] = [];
-	const memories: Json[] = [];
-	const sha = async (text: string) =>
-		Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))), (b) =>
-			b.toString(16).padStart(2, "0"),
-		).join("");
-
-	return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-		const request = new Request(input, init);
-		const url = new URL(request.url);
-		if (url.hostname === "ntfy.sh") return new Response("ok");
-		if (url.hostname !== "api.anthropic.com") return new Response("unexpected host", { status: 599 });
-		expect(request.headers.get("anthropic-beta")).toBe("agent-memory-2026-07-22");
-
-		const path = url.pathname;
-		if (path === "/v1/memory_stores" && request.method === "GET") return Response.json({ data: stores, next_page: null });
-		if (path === "/v1/memory_stores" && request.method === "POST") {
-			const body = (await request.json()) as Json;
-			const store = { id: `memstore_${stores.length + 1}`, archived_at: null, ...body };
-			stores.push(store);
-			return Response.json(store);
+describe("one hostname", () => {
+	it("refuses every other origin, workers.dev included", async () => {
+		for (const url of ["https://dexter-mcp.example.workers.dev/", "https://dexter-mcp.example.workers.dev/mcp", "http://mcp.iiiglobe.com/authorize"]) {
+			expect((await SELF.fetch(url)).status, url).toBe(421);
 		}
-		const list = path.match(/^\/v1\/memory_stores\/([^/]+)\/memories$/);
-		if (list && request.method === "GET") {
-			const prefix = url.searchParams.get("path_prefix") ?? "/";
-			const full = url.searchParams.get("view") === "full";
-			const data = memories
-				.filter((m) => m.memory_store_id === list[1] && m.path.startsWith(prefix))
-				.map((m) => ({ ...m, content: full ? m.content : null }));
-			return Response.json({ data, next_page: null });
-		}
-		if (list && request.method === "POST") {
-			const body = (await request.json()) as Json;
-			if (memories.some((m) => m.memory_store_id === list[1] && m.path === body.path)) {
-				return Response.json({ error: { message: "path exists" } }, { status: 409 });
-			}
-			const memory = {
-				type: "memory",
-				id: `mem_${memories.length + 1}`,
-				memory_store_id: list[1],
-				path: body.path,
-				content: body.content,
-				content_sha256: await sha(body.content),
-				content_size_bytes: body.content.length,
-				updated_at: new Date().toISOString(),
-			};
-			memories.push(memory);
-			return Response.json(memory);
-		}
-		const one = path.match(/^\/v1\/memory_stores\/([^/]+)\/memories\/([^/]+)$/);
-		if (one && request.method === "POST") {
-			const body = (await request.json()) as Json;
-			const memory = memories.find((m) => m.id === one[2]);
-			if (!memory) return Response.json({ error: { message: "not found" } }, { status: 404 });
-			if (body.precondition && body.precondition.content_sha256 !== memory.content_sha256) {
-				return Response.json({ error: { message: "precondition failed" } }, { status: 409 });
-			}
-			memory.content = body.content;
-			memory.content_sha256 = await sha(body.content);
-			return Response.json(memory);
-		}
-		return new Response("unhandled", { status: 598 });
-	};
-}
-
-let fetchSpy: ReturnType<typeof vi.spyOn>;
-
-beforeEach(() => {
-	resetSchemaCache();
-	fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(memoryApiStub());
-});
-
-afterEach(() => {
-	fetchSpy.mockRestore();
+	});
 });
 
 describe("OAuth surface", () => {
 	it("refuses /mcp without a token and points at resource metadata", async () => {
-		fetchSpy.mockRestore();
 		const response = await SELF.fetch(`${ORIGIN}/mcp`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -137,22 +169,39 @@ describe("OAuth surface", () => {
 		expect(response.headers.get("WWW-Authenticate") ?? "").toContain("resource_metadata");
 	});
 
-	it("publishes protected resource metadata for /mcp", async () => {
-		fetchSpy.mockRestore();
-		const response = await SELF.fetch(`${ORIGIN}/.well-known/oauth-protected-resource/mcp`);
-		expect(response.status).toBe(200);
-		const body = (await response.json()) as Json;
-		expect(body.resource).toBe(`${ORIGIN}/mcp`);
+	it("publishes protected resource metadata bound to exactly https://mcp.iiiglobe.com/mcp", async () => {
+		const body = (await (await SELF.fetch(`${ORIGIN}/.well-known/oauth-protected-resource/mcp`)).json()) as Json;
+		expect(body.resource).toBe("https://mcp.iiiglobe.com/mcp");
+		expect(body.authorization_servers).toEqual(["https://mcp.iiiglobe.com"]);
 	});
 
-	it("shows which secrets are missing instead of failing silently", async () => {
+	it("publishes server metadata with iss support, revocation and S256", async () => {
+		const body = (await (await SELF.fetch(`${ORIGIN}/.well-known/oauth-authorization-server`)).json()) as Json;
+		expect(body.issuer).toBe("https://mcp.iiiglobe.com");
+		expect(body.authorization_response_iss_parameter_supported).toBe(true);
+		expect(body.revocation_endpoint).toBe("https://mcp.iiiglobe.com/token");
+		expect(body.code_challenge_methods_supported).toContain("S256");
+		expect(body.scopes_supported).toEqual(["dexter.read", "offline_access"]);
+	});
+
+	it("shows which secrets are missing instead of failing silently, BRIDGE_SECRET included", async () => {
 		const ctx = createExecutionContext();
-		const partial = { ...env, ANTHROPIC_API_KEY: undefined, DEXTER_PASSPHRASE: "short" } as Env;
-		const response = await handleAuthRequest(new Request(`${ORIGIN}/`), partial, ctx);
-		const html = await response.text();
-		expect(html).toContain("ANTHROPIC_API_KEY");
+		const partial = { ...env, BRIDGE_SECRET: undefined, DEXTER_PASSPHRASE: "short" } as Env;
+		const html = await (await handleAuthRequest(new Request(`${ORIGIN}/`), partial, ctx)).text();
+		expect(html).toContain("BRIDGE_SECRET");
+		expect(html).not.toContain("ANTHROPIC_API_KEY");
 		expect(html).toContain("DEXTER_PASSPHRASE (needs at least 12 characters)");
 		expect(html).not.toContain("short");
+
+		const badLength = { ...env, BRIDGE_SECRET: "c2hvcnQ=" } as Env;
+		const html2 = await (await handleAuthRequest(new Request(`${ORIGIN}/`), badLength, ctx)).text();
+		expect(html2).toContain("BRIDGE_SECRET (must be the 32-byte base64 value");
+		expect(html2).not.toContain("c2hvcnQ=");
+	});
+
+	it("blocks sign-in while BRIDGE_SECRET is missing", async () => {
+		const response = await viaWorker(new Request(`${ORIGIN}/authorize`, { headers: { "CF-Connecting-IP": ip } }), { BRIDGE_SECRET: undefined } as Partial<Env>);
+		expect(response.status).toBe(503);
 	});
 
 	it("asks for ALLOWED_EMAIL once Access sign-in is configured", async () => {
@@ -168,65 +217,11 @@ describe("OAuth surface", () => {
 		expect(html).not.toContain("test-secret");
 	});
 
-	describe("ALLOW_CLIENT_REGISTRATION fails closed", () => {
-		const host = new URL(ORIGIN).host;
-		const registrationBody = JSON.stringify({ client_name: "Late Comer", redirect_uris: ["https://late.example.com/cb"] });
-
-		// A fresh IP per call: the real AUTH_RL budget is 10 a minute per IP, and these make many calls.
-		const register = (custom: Partial<Env>) =>
-			viaWorker(
-				new Request(`${ORIGIN}/register`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", Host: host, "CF-Connecting-IP": randomIp() },
-					body: registrationBody,
-				}),
-				custom,
-			);
-		const metadata = async (custom: Partial<Env>) =>
-			(await viaWorker(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`, { headers: { Host: host } }), custom).then((r) =>
-				r.json(),
-			)) as Json;
-
-		// "false" is the documented way off. Everything else here is a value somebody might type
-		// meaning off (or mistype meaning on): none of them may leave registration open. Whitespace
-		// and a typo of "true" are in the list because only the exact word opens it.
-		it.each(["false", "FALSE", "no", "off", "0", "maybe", "yes", "1", "", " ", " true", "true ", "ttrue"])(
-			"closes registration for the value %j",
-			async (value) => {
-				const off = { ALLOW_CLIENT_REGISTRATION: value };
-				const registration = await register(off);
-				expect(registration.status).toBe(403);
-				expect(((await registration.json()) as Json).error).toBe("access_denied");
-
-				const advertised = await metadata(off);
-				expect(advertised.registration_endpoint).toBeUndefined();
-				expect(advertised.token_endpoint).toBe(`${ORIGIN}/token`);
-			},
-		);
-
-		it.each([
-			["unset", undefined],
-			["true", "true"],
-			["TRUE", "TRUE"],
-			["True", "True"],
-		])("leaves registration open when the value is %s", async (_label, value) => {
-			const on = { ALLOW_CLIENT_REGISTRATION: value };
-			const registration = await register(on);
-			expect(registration.status).toBeLessThan(300);
-			expect(((await registration.json()) as Json).client_id).toBeTruthy();
-			expect((await metadata(on)).registration_endpoint).toBe(`${ORIGIN}/register`);
-		});
-
-		it("does not throw on a JSON var: a boolean false closes it, a boolean true leaves it open", async () => {
-			const asVar = (value: unknown) => ({ ALLOW_CLIENT_REGISTRATION: value }) as unknown as Partial<Env>;
-			expect((await register(asVar(false))).status).toBe(403);
-			expect((await metadata(asVar(false))).registration_endpoint).toBeUndefined();
-			expect((await register(asVar(true))).status).toBeLessThan(300);
-		});
-	});
-
-	it("rejects tokens that weren't issued to the operator", async () => {
+	it("rejects tokens that weren't issued to the operator, or carry no app label", async () => {
 		expect((await rpc("tools/list", {}, { operator: false })).status).toBe(403);
+		expect((await rpc("tools/list", {}, { app: undefined })).status).toBe(403);
+		expect((await rpc("tools/list", {}, { app: "alexa" })).status).toBe(403);
+		expect((await rpc("tools/list", {}, { clientId: undefined })).status).toBe(403);
 	});
 
 	it("rejects a token with no email once ALLOWED_EMAIL is set", async () => {
@@ -236,185 +231,165 @@ describe("OAuth surface", () => {
 		const matching = await rpc("tools/list", {}, { email: "Operator@Example.com" }, allowed);
 		expect(matching.result?.tools?.map((t: Json) => t.name)).toEqual([...TOOL_NAMES]);
 	});
+});
 
-	it("rejects an Access identity that isn't ALLOWED_EMAIL", async () => {
-		const ctx = createExecutionContext() as ExecutionContext & { props?: Json };
-		ctx.props = { operator: true, email: "someone@else.com", sub: "x", client: "Claude" };
-		const request = new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { Host: new URL(ORIGIN).host }, body: "{}" });
-		const response = await mcpApiHandler.fetch(request, { ...env, ALLOWED_EMAIL: "operator@example.com" } as Env, ctx);
-		expect(response.status).toBe(403);
+describe("registration is closed by default and fails closed", () => {
+	const registrationBody = JSON.stringify({ client_name: "Late Comer", redirect_uris: [CLAUDE_REDIRECT] });
+	const register = (custom: Partial<Env>) =>
+		viaWorker(
+			new Request(`${ORIGIN}/register`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", "CF-Connecting-IP": randomIp() },
+				body: registrationBody,
+			}),
+			custom,
+		);
+	const metadata = async (custom: Partial<Env>) =>
+		(await viaWorker(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`), custom).then((r) => r.json())) as Json;
+
+	const offValues: [string, string | undefined][] = [
+		["unset", undefined],
+		...["false", "FALSE", "no", "off", "0", "maybe", "yes", "1", "", " ", " true", "true ", "ttrue"].map((v): [string, string] => [JSON.stringify(v), v]),
+	];
+	it.each(offValues)("closes registration and CIMD for the value %s", async (_label, value) => {
+		const off = { ALLOW_CLIENT_REGISTRATION: value } as Partial<Env>;
+		const registration = await register(off);
+		expect(registration.status).toBe(403);
+		expect(((await registration.json()) as Json).error).toBe("access_denied");
+		const advertised = await metadata(off);
+		expect(advertised.registration_endpoint).toBeUndefined();
+		expect(advertised.client_id_metadata_document_supported).toBe(false);
+		expect(advertised.token_endpoint).toBe(`${ORIGIN}/token`);
+	});
+
+	it.each([["true"], ["TRUE"], ["True"]])("opens registration and CIMD only for %s", async (value) => {
+		const on = { ALLOW_CLIENT_REGISTRATION: value };
+		const registration = await register(on);
+		expect(registration.status).toBeLessThan(300);
+		expect(((await registration.json()) as Json).client_id).toBeTruthy();
+		const advertised = await metadata(on);
+		expect(advertised.registration_endpoint).toBe(`${ORIGIN}/register`);
+		expect(advertised.client_id_metadata_document_supported).toBe(true);
+	});
+
+	it("does not throw on a JSON var: false closes it, true opens it", async () => {
+		const asVar = (value: unknown) => ({ ALLOW_CLIENT_REGISTRATION: value }) as unknown as Partial<Env>;
+		expect((await register(asVar(false))).status).toBe(403);
+		expect((await register(asVar(true))).status).toBeLessThan(300);
+	});
+
+	it("an app registered while open keeps signing in after it closes", async () => {
+		const client_id = await registerClient();
+		const consent = await startConsent({ client_id }); // registration closed (unset) here
+		expect(consent.html).toContain("Claude");
 	});
 });
 
-describe("tools", () => {
-	it("lists every DEXTER tool, in a fixed order", async () => {
-		const result = await rpc("tools/list");
-		const names = (result.result?.tools ?? []).map((t: Json) => t.name);
-		expect(names).toEqual([...TOOL_NAMES]);
+describe("tools and per-app policy", () => {
+	beforeEach(async () => {
+		await resetBridge();
 	});
 
-	it("logs entries and shows them in status", async () => {
-		const logged = await callTool("dexter_log", { kind: "workout", text: "5AM run, 3 miles" });
-		expect(logged.text).toMatch(/^Logged log_[0-9a-f]{8} \(workout\)/);
-
-		const status = await callTool("dexter_status");
-		expect(status.text).toContain("workout · 5AM run, 3 miles");
-		expect(status.text).toContain("STATE.md: not saved yet");
-		expect(status.text).toContain("push configured, not yet confirmed");
-		expect(status.text).not.toContain("dexter-test-topic");
+	it("Claude and Claude Code see all four tools, ChatGPT sees three (no memory search)", async () => {
+		const names = async (app: string) => ((await rpc("tools/list", {}, { app })).result?.tools ?? []).map((t: Json) => t.name);
+		expect(await names("claude")).toEqual(["dexter_ask", "dexter_whats_live", "dexter_queue", "dexter_memory_search"]);
+		expect(await names("claude_code")).toEqual(["dexter_ask", "dexter_whats_live", "dexter_queue", "dexter_memory_search"]);
+		expect(await names("chatgpt")).toEqual(["dexter_ask", "dexter_whats_live", "dexter_queue"]);
 	});
 
-	it("generates the ntfy topic on first status but never shows it to an assistant", async () => {
-		const noPinnedTopic = { NTFY_TOPIC: undefined };
-		const status = await callTool("dexter_status", {}, noPinnedTopic);
-		const row = await env.DB.prepare(`SELECT value FROM config WHERE key = 'ntfy_topic'`).first<{ value: string }>();
-		expect(row?.value).toMatch(/^dexter-[0-9a-f]{32}$/);
-		expect(status.text).toContain("push configured");
-		expect(status.text).not.toContain(row!.value);
-		expect(status.text).not.toContain(row!.value.slice("dexter-".length));
-
-		const listing = await rpc("tools/list", {}, {}, noPinnedTopic);
-		expect(JSON.stringify(listing)).not.toContain(row!.value);
-	});
-
-	it("sets, lists and cancels reminders", async () => {
-		const due = new Date(Date.now() + 60 * 60 * 1000).toISOString().replace("Z", "+00:00");
-		const set = await callTool("dexter_remind", { text: "Call Corinthian", due_at: due });
-		const id = set.text.match(/rem_[0-9a-f]{8}/)?.[0];
-		expect(id).toBeTruthy();
-
-		expect((await callTool("dexter_status")).text).toContain(`${id} ·`);
-		expect((await callTool("dexter_cancel_reminder", { id })).text).toBe(`Cancelled ${id}.`);
-		expect((await callTool("dexter_cancel_reminder", { id })).isError).toBe(true);
-	});
-
-	it("refuses reminders without an offset", async () => {
-		const result = await callTool("dexter_remind", { text: "x", due_at: "2026-12-01T09:00:00" });
-		expect(result.isError).toBe(true);
-		expect(result.text).toContain("UTC offset");
-	});
-
-	it("writes STATE.md with a hash guard, and status reads the handoff", async () => {
-		const first = await callTool("dexter_state_write", {
-			content: "Last updated: 2026-10-10\n\nHandoff note (where I left off)\n\nShip DEX-001.",
-		});
-		expect(first.text).toContain("first version");
-
-		const status = await callTool("dexter_status");
-		expect(status.text).toContain("Handoff: Ship DEX-001.");
-
-		const noBase = await callTool("dexter_state_write", { content: "overwrite" });
-		expect(noBase.isError).toBe(true);
-
-		const read = await callTool("dexter_memory_read", { path: "/state/STATE.md" });
-		const sha = read.text.match(/sha256: ([0-9a-f]{64})/)?.[1];
-		expect(sha).toBeTruthy();
-
-		const second = await callTool("dexter_state_write", { content: "Handoff note\n\nNext.", base_sha256: sha });
-		expect(second.text).toContain("STATE.md updated");
-
-		const stale = await callTool("dexter_state_write", { content: "again", base_sha256: sha });
-		expect(stale.isError).toBe(true);
-		expect(stale.text).toContain("changed since you read it");
-	});
-
-	it("puts proposed memory in the inbox and never overwrites", async () => {
-		const a = await callTool("dexter_memory_propose", { title: "BBI2 tracklist idea", content: "Open with Wake Up." });
-		const b = await callTool("dexter_memory_propose", { title: "BBI2 tracklist idea", content: "Second thought." });
-		expect(a.text).toMatch(/Saved to \/inbox\/claude\/\d{4}-\d{2}-\d{2}-bbi2-tracklist-idea\.md/);
-		expect(b.text).toMatch(/bbi2-tracklist-idea-2\.md/);
-
-		const listing = await callTool("dexter_memory_list", { path_prefix: "inbox" });
-		expect(listing.text.split("\n")).toHaveLength(2);
-	});
-});
-
-describe("reminder delivery", () => {
-	it("sends due reminders once", async () => {
-		const due = new Date(Date.now() + 2 * 60 * 1000).toISOString();
-		await callTool("dexter_remind", { text: "Stretch", due_at: due });
-
-		const later = new Date(Date.now() + 3 * 60 * 1000);
-		expect(await deliverDueReminders(env, later)).toEqual({ sent: 1, failed: 0 });
-		expect(await deliverDueReminders(env, later)).toEqual({ sent: 0, failed: 0 });
-
-		const pushes = fetchSpy.mock.calls.filter(([input]: unknown[]) => String(input).startsWith("https://ntfy.sh/"));
-		expect(pushes).toHaveLength(1);
-		expect(String(pushes[0][0])).toBe("https://ntfy.sh/dexter-test-topic");
-
-		const status = await callTool("dexter_status");
-		expect(status.text).not.toContain("push configured");
-	});
-
-	it("leaves an overdue reminder alone while another run is still sending it", async () => {
-		const due = new Date(Date.now() + 2 * 60 * 1000).toISOString();
-		const id = (await callTool("dexter_remind", { text: "Overdue", due_at: due })).text.match(/rem_[0-9a-f]{8}/)![0];
-		// 15 minutes past due, and claimed by another run one minute ago.
-		const now = new Date(Date.now() + 17 * 60 * 1000);
-		const minutesAgo = (n: number) => new Date(now.getTime() - n * 60 * 1000).toISOString();
-		await env.DB.prepare(`UPDATE reminders SET status = 'sending', attempts = 1, claimed_at = ? WHERE id = ?`)
-			.bind(minutesAgo(1), id)
-			.run();
-
-		expect(await deliverDueReminders(env, now)).toEqual({ sent: 0, failed: 0 });
-		const untouched = await env.DB.prepare(`SELECT status, attempts FROM reminders WHERE id = ?`).bind(id).first();
-		expect(untouched).toEqual({ status: "sending", attempts: 1 });
-
-		// Once the claim itself is older than 10 minutes the row is put back in line and sent once.
-		await env.DB.prepare(`UPDATE reminders SET claimed_at = ? WHERE id = ?`).bind(minutesAgo(11), id).run();
-		expect(await deliverDueReminders(env, now)).toEqual({ sent: 1, failed: 0 });
-		const pushes = fetchSpy.mock.calls.filter(([input]: unknown[]) => String(input).startsWith("https://ntfy.sh/"));
-		expect(pushes).toHaveLength(1);
-	});
-
-	it("treats a 'sending' row from before claimed_at existed as stuck", async () => {
-		const due = new Date(Date.now() + 2 * 60 * 1000).toISOString();
-		const id = (await callTool("dexter_remind", { text: "Legacy", due_at: due })).text.match(/rem_[0-9a-f]{8}/)![0];
-		await env.DB.prepare(`UPDATE reminders SET status = 'sending', attempts = 1, claimed_at = NULL WHERE id = ?`).bind(id).run();
-		expect(await deliverDueReminders(env, new Date(Date.now() + 3 * 60 * 1000))).toEqual({ sent: 1, failed: 0 });
-	});
-
-	it("adds claimed_at to a reminders table created before the column existed", async () => {
-		await env.DB.prepare(`DROP TABLE IF EXISTS reminders`).run();
-		await env.DB.prepare(
-			`CREATE TABLE reminders (id TEXT PRIMARY KEY, text TEXT NOT NULL, due_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, source TEXT, created_at TEXT NOT NULL, sent_at TEXT)`,
-		).run();
-		for (let pass = 1; pass <= 2; pass++) {
-			resetSchemaCache();
-			await ensureSchema(env.DB);
-			const { results } = await env.DB.prepare(`PRAGMA table_info(reminders)`).all<{ name: string }>();
-			expect(results.map((c) => c.name), `pass ${pass}`).toContain("claimed_at");
+	it("every tool is marked read-only", async () => {
+		const tools = (await rpc("tools/list")).result.tools as Json[];
+		expect(tools).toHaveLength(4);
+		for (const tool of tools) {
+			expect(tool.annotations?.readOnlyHint, tool.name).toBe(true);
+			expect(tool.annotations?.destructiveHint, tool.name).toBe(false);
 		}
 	});
 
-	it("marks a reminder failed after three failed sends", async () => {
-		fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
-			if (String(input).startsWith("https://ntfy.sh/")) return new Response("down", { status: 503 });
-			return memoryApiStub()(input);
-		});
-		const due = new Date(Date.now() + 2 * 60 * 1000).toISOString();
-		await callTool("dexter_remind", { text: "Hydrate", due_at: due });
+	it("ChatGPT can't call dexter_memory_search even by name, and nothing reaches the Mac", async () => {
+		const mac = await connectMac();
+		const seen = serve(mac.sock, () => ({ text: "should never be asked", is_error: false }));
+		const result = await callTool("dexter_memory_search", { query: "anything" }, { app: "chatgpt" });
+		expect(result.text).not.toContain("should never be asked");
+		expect(result.isError || result.raw.error).toBeTruthy();
+		expect(seen.requests).toHaveLength(0);
+	});
 
-		const later = new Date(Date.now() + 3 * 60 * 1000);
-		for (let i = 0; i < 3; i++) await deliverDueReminders(env, later);
-		const status = await callTool("dexter_status");
-		expect(status.text).toContain("Reminders that failed to send:");
-		expect(status.text).toContain("Hydrate");
+	it("relays a tool call with the caller's app label and client id, and returns DEXTER's answer", async () => {
+		const mac = await connectMac();
+		const seen = serve(mac.sock, (req) => ({ text: `answer to ${JSON.parse(req.body).args.question}`, is_error: false }));
+		const result = await callTool("dexter_ask", { question: "what's live?" }, { app: "chatgpt", clientId: "https://chatgpt.com/x" });
+		expect(result).toMatchObject({ text: "answer to what's live?", isError: false });
+		expect(seen.requests).toHaveLength(1);
+		expect(seen.requests[0].tool).toBe("dexter_ask");
+		expect(JSON.parse(seen.requests[0].body)).toEqual({ args: { question: "what's live?" }, app: "chatgpt", client_id: "https://chatgpt.com/x" });
+	});
+
+	it("validates arguments before anything is relayed", async () => {
+		const mac = await connectMac();
+		const seen = serve(mac.sock, () => ({ text: "x", is_error: false }));
+		const empty = await callTool("dexter_ask", { question: "   " });
+		const huge = await callTool("dexter_memory_search", { query: "q".repeat(501) });
+		for (const r of [empty, huge]) expect(r.isError || r.raw.error).toBeTruthy();
+		expect(seen.requests).toHaveLength(0);
+	});
+});
+
+describe("client labels come from the client id / redirect URI, not the name", () => {
+	it.each([
+		["https://claude.ai/oauth/mcp-client", CLAUDE_REDIRECT, undefined, "claude"],
+		["https://claude.ai/oauth/claude-code", "http://localhost:53682/callback", undefined, "claude_code"],
+		["https://chatgpt.com/oauth/client.json", CHATGPT_REDIRECT, undefined, "chatgpt"],
+		["dcr-client", CLAUDE_REDIRECT, "ChatGPT", "claude"],
+		["dcr-client", CHATGPT_REDIRECT, "Claude", "chatgpt"],
+		["dcr-client", "http://127.0.0.1:9000/cb", "Claude Code", "claude_code"],
+		["dcr-client", "http://127.0.0.1:9000/cb", "Codex", "chatgpt"],
+		["dcr-client", "https://evil.example/cb", "Claude", null],
+		["https://evil.example/meta", CLAUDE_REDIRECT, "Claude", null],
+		["https://claude.ai.evil.example/meta", CLAUDE_REDIRECT, undefined, null],
+		["https://claude.ai:8443/meta", CLAUDE_REDIRECT, undefined, null],
+		["https://claude.ai/meta", "https://evil.example/cb", undefined, null],
+	])("%s + %s (%s) -> %s", (clientId, redirect, name, expected) => {
+		expect(classifyClient(clientId, redirect, name)).toBe(expected);
+	});
+
+	it("an unrecognised app is refused at the consent page", async () => {
+		const client_id = await registerClient("https://evil.example.com/cb", "Claude");
+		const { verifier, challenge } = await pkce();
+		void verifier;
+		const response = await SELF.fetch(authorizeUrl({ client_id, redirect_uri: "https://evil.example.com/cb", code_challenge: challenge }), {
+			redirect: "manual",
+			headers: { "CF-Connecting-IP": ip },
+		});
+		expect(response.status).toBe(400);
+		const html = await response.text();
+		expect(html).toContain("isn");
+		expect(html).not.toContain('name="handle"');
 	});
 });
 
 describe("protocol eras", () => {
-	it("serves 2026-07-28 clients as well as 2025-era clients", async () => {
+	it("a 2025-era client can initialize, then list tools, without Mcp-Method or Mcp-Name", async () => {
+		const init = await rpc(
+			"initialize",
+			{ protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "legacy", version: "1.0.0" } },
+			{},
+			{},
+			{ "MCP-Protocol-Version": undefined as unknown as string },
+		);
+		expect(init.error, JSON.stringify(init.error)).toBeUndefined();
+		expect(init.result?.serverInfo?.name).toBe("dexter");
+		expect(typeof init.result?.protocolVersion).toBe("string");
+		const tools = await rpc("tools/list", {}, {}, {}, { "MCP-Protocol-Version": "2025-06-18" });
+		expect(tools.result?.tools?.map((t: Json) => t.name)).toEqual([...TOOL_NAMES]);
+	});
+
+	it("serves 2026-07-28 clients too", async () => {
 		const ctx = createExecutionContext() as ExecutionContext & { props?: Json };
-		ctx.props = { operator: true, email: "", name: "Operator", sub: "operator", client: "Claude" };
+		ctx.props = { operator: true, email: "", name: "Operator", sub: "operator", client: "Claude", app: "claude", clientId: "c" };
 		const request = new Request(`${ORIGIN}/mcp`, {
 			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Accept: "application/json, text/event-stream",
-				Host: new URL(ORIGIN).host,
-				"Mcp-Method": "tools/list",
-			},
+			headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "Mcp-Method": "tools/list" },
 			body: JSON.stringify({
 				jsonrpc: "2.0",
 				id: 7,
@@ -430,129 +405,122 @@ describe("protocol eras", () => {
 		});
 		const response = await mcpApiHandler.fetch(request, env, ctx);
 		await waitOnExecutionContext(ctx);
-		const text = await response.text();
-		const payload = text.includes("data:")
-			? JSON.parse(text.split("\n").filter((l) => l.startsWith("data:")).pop()!.slice(5))
-			: JSON.parse(text);
+		const payload = await parseMcp(response);
 		expect(payload.error, JSON.stringify(payload.error)).toBeUndefined();
 		expect(payload.result.tools.map((t: Json) => t.name)).toEqual([...TOOL_NAMES]);
 	});
 });
 
-/** A fresh client IP per test: the rate limiter and the lock-out counter are both keyed by it. */
-let ip = "";
-function randomIp(): string {
-	const [a, b, c] = crypto.getRandomValues(new Uint8Array(3));
-	return `10.${a}.${b}.${c}`;
-}
-beforeEach(() => {
-	ip = randomIp();
-});
-
-/** Sends a request straight into the Worker's fetch handler with a modified environment. */
-async function viaWorker(request: Request, custom: Partial<Env>): Promise<Response> {
-	const ctx = createExecutionContext();
-	const response = await worker.fetch(request as Parameters<typeof worker.fetch>[0], { ...env, ...custom } as Env, ctx);
-	await waitOnExecutionContext(ctx);
-	return response;
-}
-
 describe("end-to-end OAuth with the passphrase", () => {
-	const REDIRECT = "https://client.example.com/callback";
+	it("the consent page names the app, its redirect host and that access is read-only", async () => {
+		const { html } = await startConsent();
+		expect(html).toContain("<strong>Claude</strong>");
+		expect(html).toContain("<strong>claude.ai</strong>");
+		expect(html).toContain("read-only");
+		expect(html).toContain("search its memory");
+		const chatgpt = await startConsent({ redirect: CHATGPT_REDIRECT });
+		expect(chatgpt.html).toContain("<strong>chatgpt.com</strong>");
+		expect(chatgpt.html).not.toContain("search its memory");
+	});
 
-	async function pkce() {
-		const verifier = "v".repeat(10) + crypto.randomUUID() + crypto.randomUUID();
-		const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-		let binary = "";
-		for (const b of new Uint8Array(digest)) binary += String.fromCharCode(b);
-		const challenge = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-		return { verifier, challenge };
-	}
+	it("issues a token (iss on the redirect, 1 hour, refresh token) that opens /mcp with the right tools", async () => {
+		const { location, tokens } = await signIn();
+		expect(location.origin + location.pathname).toBe(CLAUDE_REDIRECT);
+		expect(location.searchParams.get("state")).toBe("state-123");
+		expect(location.searchParams.get("iss")).toBe("https://mcp.iiiglobe.com");
+		expect(tokens.expires_in).toBeLessThanOrEqual(3600);
+		expect(tokens.refresh_token).toBeTruthy();
+		expect(tokens.scope).toBe("dexter.read");
 
-	const cookieHeader = (response: Response) =>
-		response.headers
-			.getSetCookie()
-			.map((cookie) => cookie.split(";")[0])
-			.join("; ");
+		const response = await mcpWithToken(tokens.access_token);
+		expect(response.status).toBe(200);
+		const payload = await parseMcp(response);
+		expect(payload.result.tools.map((t: Json) => t.name)).toEqual([...TOOL_NAMES]);
+	});
 
-	async function registerClient(): Promise<string> {
-		const registration = await SELF.fetch(`${ORIGIN}/register`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
-			body: JSON.stringify({
-				client_name: "Test Client",
-				redirect_uris: [REDIRECT],
-				token_endpoint_auth_method: "none",
-				grant_types: ["authorization_code", "refresh_token"],
-				response_types: ["code"],
-			}),
+	it("a ChatGPT sign-in gets offline_access when it asks, and its token lists three tools", async () => {
+		const { tokens } = await signIn({ redirect: CHATGPT_REDIRECT, scope: "offline_access" });
+		expect(tokens.scope.split(" ").sort()).toEqual(["dexter.read", "offline_access"]);
+		const payload = await parseMcp(await mcpWithToken(tokens.access_token));
+		expect(payload.result.tools.map((t: Json) => t.name)).toEqual(["dexter_ask", "dexter_whats_live", "dexter_queue"]);
+	});
+
+	it("a denied consent also carries iss", async () => {
+		const consent = await startConsent();
+		const denied = await submit(consent.handle, consent.cookies, "", "deny");
+		expect(denied.status).toBe(302);
+		const location = new URL(denied.headers.get("Location")!);
+		expect(location.searchParams.get("error")).toBe("access_denied");
+		expect(location.searchParams.get("iss")).toBe("https://mcp.iiiglobe.com");
+	});
+
+	it("refresh tokens rotate: each refresh returns a new one, and a superseded one stops working", async () => {
+		const { client_id, tokens } = await signIn();
+		const first = tokens.refresh_token as string;
+		const r1 = await token({ grant_type: "refresh_token", refresh_token: first, client_id });
+		expect(r1.status).toBe(200);
+		const second = ((await r1.json()) as Json).refresh_token as string;
+		expect(second).toBeTruthy();
+		expect(second).not.toBe(first);
+		const r2 = await token({ grant_type: "refresh_token", refresh_token: second, client_id });
+		expect(r2.status).toBe(200);
+		const third = ((await r2.json()) as Json).refresh_token as string;
+		expect(third).not.toBe(second);
+		// Two rotations later the first refresh token is dead.
+		expect((await token({ grant_type: "refresh_token", refresh_token: first, client_id })).status).toBe(400);
+	});
+
+	it("revoking a token closes /mcp to it", async () => {
+		const { client_id, tokens } = await signIn();
+		expect((await mcpWithToken(tokens.access_token)).status).toBe(200);
+		const revoked = await token({ token: tokens.access_token, token_type_hint: "access_token", client_id });
+		expect(revoked.status).toBe(200);
+		expect((await mcpWithToken(tokens.access_token)).status).toBe(401);
+	});
+
+	it("binds the audience: an authorization request for another resource gets no consent page", async () => {
+		const client_id = await registerClient();
+		const { challenge } = await pkce();
+		for (const resource of ["https://evil.example/mcp", "https://mcp.iiiglobe.com/other", "https://mcp.iiiglobe.com/mcp/"]) {
+			const response = await SELF.fetch(authorizeUrl({ client_id, redirect_uri: CLAUDE_REDIRECT, code_challenge: challenge, resource }), {
+				redirect: "manual",
+				headers: { "CF-Connecting-IP": randomIp() },
+			});
+			const body = await response.text();
+			expect(body, resource).not.toContain('name="handle"');
+			if (response.status === 302) expect(new URL(response.headers.get("Location")!).searchParams.get("error"), resource).toBe("invalid_target");
+			else expect(response.status, resource).toBe(400);
+		}
+	});
+
+	it("binds the audience: a code can't be exchanged for a token to another resource", async () => {
+		const consent = await startConsent();
+		const approved = await submit(consent.handle, consent.cookies, "correct horse battery staple");
+		const code = new URL(approved.headers.get("Location")!).searchParams.get("code")!;
+		const response = await token({
+			grant_type: "authorization_code",
+			code,
+			redirect_uri: consent.redirect,
+			client_id: consent.client_id,
+			code_verifier: consent.verifier,
+			resource: "https://evil.example/mcp",
 		});
-		expect(registration.status).toBeLessThan(300);
-		return ((await registration.json()) as Json).client_id;
-	}
+		expect(response.status).toBe(400);
+		expect(((await response.json()) as Json).error).toBe("invalid_target");
+	});
 
-	async function startConsent(client_id?: string) {
-		client_id ??= await registerClient();
-		const { verifier, challenge } = await pkce();
-		const authorizeUrl = new URL(`${ORIGIN}/authorize`);
-		authorizeUrl.search = new URLSearchParams({
-			response_type: "code",
-			client_id,
-			redirect_uri: REDIRECT,
-			code_challenge: challenge,
-			code_challenge_method: "S256",
-			state: "state-123",
-			resource: `${ORIGIN}/mcp`,
-		}).toString();
-		// GET /authorize is metered per IP, so it carries this test's IP like every other call here.
-		const consent = await SELF.fetch(authorizeUrl, { redirect: "manual", headers: { "CF-Connecting-IP": ip } });
-		expect(consent.status).toBe(200);
-		const html = await consent.text();
-		expect(html).toContain("Test Client");
-		expect(html).toContain('type="password"');
-		const handle = html.match(/name="handle" value="([^"]+)"/)?.[1];
-		expect(handle).toBeTruthy();
-		return { client_id, verifier, handle: handle!, cookies: cookieHeader(consent) };
-	}
-
-	function approveRequest(handle: string, cookies: string, passphrase: string) {
-		return new Request(`${ORIGIN}/authorize`, {
-			method: "POST",
-			redirect: "manual",
-			headers: {
-				"Content-Type": "application/x-www-form-urlencoded",
-				Cookie: cookies,
-				Host: new URL(ORIGIN).host,
-				"CF-Connecting-IP": ip,
-			},
-			body: new URLSearchParams({ handle, decision: "approve", passphrase }).toString(),
-		});
-	}
-
-	async function submit(handle: string, cookies: string, passphrase: string) {
-		return SELF.fetch(approveRequest(handle, cookies, passphrase));
-	}
-
-	/** Same POST, but straight into the Worker with a modified environment. */
-	function submitWith(custom: Partial<Env>, handle: string, cookies: string, passphrase: string) {
-		return viaWorker(approveRequest(handle, cookies, passphrase), custom);
-	}
-
-	/** The real OAUTH_KV, except that the named methods throw for keys under `prefix`. */
-	function kvFailingOn(prefix: string, methods: ("get" | "put")[]): KVNamespace {
-		const real = env.OAUTH_KV as any;
-		const wrap = (method: "get" | "put") => (key: string, ...rest: unknown[]) => {
-			if (methods.includes(method) && key.startsWith(prefix)) return Promise.reject(new Error("KV unavailable"));
-			return real[method](key, ...rest);
-		};
-		return {
-			get: wrap("get"),
-			put: wrap("put"),
-			delete: (key: string) => real.delete(key),
-			list: (options?: unknown) => real.list(options),
-			getWithMetadata: (...args: unknown[]) => real.getWithMetadata(...args),
-		} as unknown as KVNamespace;
-	}
+	it("redirect URIs must match exactly", async () => {
+		const client_id = await registerClient();
+		const { challenge } = await pkce();
+		for (const redirect_uri of [`${CLAUDE_REDIRECT}/`, `${CLAUDE_REDIRECT}?x=1`, "https://claude.ai/api/mcp/other"]) {
+			const response = await SELF.fetch(authorizeUrl({ client_id, redirect_uri, code_challenge: challenge }), {
+				redirect: "manual",
+				headers: { "CF-Connecting-IP": randomIp() },
+			});
+			expect(response.status, redirect_uri).toBe(400);
+			expect(response.headers.get("Location"), redirect_uri).toBeNull();
+		}
+	});
 
 	it("refuses a wrong passphrase and offers a fresh consent form to retry on", async () => {
 		const { handle, cookies } = await startConsent();
@@ -563,11 +531,8 @@ describe("end-to-end OAuth with the passphrase", () => {
 		const freshHandle = html.match(/name="handle" value="([^"]+)"/)?.[1];
 		expect(freshHandle).toBeTruthy();
 		expect(freshHandle).not.toBe(handle);
-
-		// The first handle was consumed when it was checked, before the passphrase was compared.
 		const reused = await submit(handle, cookies, "correct horse battery staple");
 		expect(reused.status).toBe(400);
-
 		const right = await submit(freshHandle!, cookieHeader(wrong), "correct horse battery staple");
 		expect(right.status).toBe(302);
 	});
@@ -588,30 +553,39 @@ describe("end-to-end OAuth with the passphrase", () => {
 		expect(right.headers.get("Location")).toBeNull();
 	});
 
+	/** The real OAUTH_KV, except that the named methods throw for keys under `prefix`. */
+	function kvFailingOn(prefix: string, methods: ("get" | "put")[]): KVNamespace {
+		const real = env.OAUTH_KV as any;
+		const wrap = (method: "get" | "put") => (k: string, ...rest: unknown[]) => {
+			if (methods.includes(method) && k.startsWith(prefix)) return Promise.reject(new Error("KV unavailable"));
+			return real[method](k, ...rest);
+		};
+		return {
+			get: wrap("get"),
+			put: wrap("put"),
+			delete: (k: string) => real.delete(k),
+			list: (options?: unknown) => real.list(options),
+			getWithMetadata: (...args: unknown[]) => real.getWithMetadata(...args),
+		} as unknown as KVNamespace;
+	}
+
 	it("issues no token while the lock-out counter can't be read, even with the right passphrase", async () => {
 		const { handle, cookies } = await startConsent();
-		const kv = kvFailingOn("dexter:pass-fail:", ["get"]);
-		const response = await submitWith({ OAUTH_KV: kv }, handle, cookies, "correct horse battery staple");
+		const response = await viaWorker(approveRequest(handle, cookies, "correct horse battery staple"), { OAUTH_KV: kvFailingOn("dexter:pass-fail:", ["get"]) });
 		expect(response.status).toBe(500);
 		expect(response.headers.get("Location")).toBeNull();
-		// The handle was never consumed: the same consent form still works once KV is back.
-		const retry = await submit(handle, cookies, "correct horse battery staple");
-		expect(retry.status).toBe(302);
+		expect((await submit(handle, cookies, "correct horse battery staple")).status).toBe(302);
 	});
 
 	it("refuses instead of forgiving a wrong passphrase when the failure can't be recorded", async () => {
 		const { handle, cookies } = await startConsent();
-		const kv = kvFailingOn("dexter:pass-fail:", ["put"]);
-		const response = await submitWith({ OAUTH_KV: kv }, handle, cookies, "not the passphrase");
+		const response = await viaWorker(approveRequest(handle, cookies, "not the passphrase"), { OAUTH_KV: kvFailingOn("dexter:pass-fail:", ["put"]) });
 		expect(response.status).toBe(500);
 		expect(await response.text()).not.toContain('name="handle"');
 	});
 
 	it("locks an IP out after five wrong passphrases", async () => {
-		// One consent page, retried on the fresh form each wrong answer brings back (how a person
-		// types a wrong passphrase). That is 8 requests against the 10-a-minute AUTH_RL budget: the
-		// lock-out has to be reachable before the rate limit, which is why this doesn't reopen the
-		// page for every attempt.
+		await awayFromWindowEdge();
 		let { handle, cookies } = await startConsent();
 		for (let i = 0; i < 5; i++) {
 			const wrong = await submit(handle, cookies, `wrong ${i}`);
@@ -623,119 +597,218 @@ describe("end-to-end OAuth with the passphrase", () => {
 		expect(locked.status).toBe(429);
 		expect(locked.headers.get("Retry-After")).toBe("900");
 	});
+});
 
-	describe("per-IP rate limit", () => {
-		const denying = { limit: async () => ({ success: false }) } as unknown as RateLimit;
-		const broken = { limit: async () => { throw new Error("binding down"); } } as unknown as RateLimit;
+describe("Client ID Metadata Documents", () => {
+	function cimdDoc(url: string, redirect = CLAUDE_REDIRECT, extra: Json = {}) {
+		return {
+			client_id: url,
+			client_name: "Claude",
+			redirect_uris: [redirect],
+			token_endpoint_auth_method: "none",
+			grant_types: ["authorization_code", "refresh_token"],
+			response_types: ["code"],
+			...extra,
+		};
+	}
 
-		function post(path: string, custom: Partial<Env>) {
-			const request = new Request(`${ORIGIN}${path}`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip, Host: new URL(ORIGIN).host },
-				body: "{}",
-			});
-			return viaWorker(request, custom);
-		}
+	function mockFetch(handler: (url: string) => Response | Promise<Response>) {
+		fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) =>
+			handler(new Request(input, init).url),
+		);
+		return fetchSpy;
+	}
 
-		function get(path: string, custom: Partial<Env>) {
-			return viaWorker(new Request(`${ORIGIN}${path}`, { headers: { "CF-Connecting-IP": ip, Host: new URL(ORIGIN).host } }), custom);
-		}
+	const cimdUrl = (hostname = "claude.ai") => `https://${hostname}/oauth/test-${crypto.randomUUID()}.json`;
 
-		it("returns 429 with Retry-After on /authorize and /register once the limit is hit", async () => {
-			for (const path of ["/authorize", "/register"]) {
-				const response = await post(path, { AUTH_RL: denying });
-				expect(response.status, path).toBe(429);
-				expect(response.headers.get("Retry-After"), path).toBe("60");
-			}
-			expect((await post("/register", { AUTH_RL: denying })).headers.get("Content-Type")).toContain("application/json");
-		});
+	async function authorizeWith(client_id: string, custom: Partial<Env>, redirect = CLAUDE_REDIRECT) {
+		const { challenge } = await pkce();
+		return viaWorker(
+			new Request(authorizeUrl({ client_id, redirect_uri: redirect, code_challenge: challenge }), { redirect: "manual", headers: { "CF-Connecting-IP": randomIp() } }),
+			custom,
+		);
+	}
 
-		it("meters the consent page too: GET /authorize returns 429 with Retry-After once the limit is hit", async () => {
-			const response = await get("/authorize", { AUTH_RL: denying });
-			expect(response.status).toBe(429);
-			expect(response.headers.get("Retry-After")).toBe("60");
-			expect(response.headers.get("Content-Type")).toContain("text/html");
-			expect(await response.text()).toContain("Too many sign-in attempts");
-		});
-
-		it("fails closed when the limiter itself fails", async () => {
-			expect((await post("/register", { AUTH_RL: broken })).status).toBe(429);
-			expect((await post("/authorize", { AUTH_RL: undefined })).status).toBe(429);
-			expect((await get("/authorize", { AUTH_RL: broken })).status).toBe(429);
-			expect((await get("/authorize", { AUTH_RL: undefined })).status).toBe(429);
-		});
-
-		it("is wired to the real binding: the 11th registration in a minute is refused", async () => {
-			const register = () =>
-				SELF.fetch(`${ORIGIN}/register`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
-					body: JSON.stringify({ client_name: "Burst", redirect_uris: [REDIRECT], token_endpoint_auth_method: "none" }),
-				});
-			const statuses: number[] = [];
-			for (let i = 0; i < 11; i++) statuses.push((await register()).status);
-			expect(statuses.slice(0, 10).every((s) => s < 300), statuses.join(",")).toBe(true);
-			expect(statuses[10], statuses.join(",")).toBe(429);
-		});
-
-		it("is wired to the real binding for the consent page: the 11th GET /authorize in a minute is refused", async () => {
-			const open = () => SELF.fetch(`${ORIGIN}/authorize`, { redirect: "manual", headers: { "CF-Connecting-IP": ip } });
-			const statuses: number[] = [];
-			for (let i = 0; i < 11; i++) statuses.push((await open()).status);
-			// No OAuth parameters, so the first ten get the provider's own error page, never a 429.
-			expect(statuses.slice(0, 10).every((s) => s !== 429), statuses.join(",")).toBe(true);
-			expect(statuses[10], statuses.join(",")).toBe(429);
-		});
-
-		it("does not meter the other GET requests: the status page and the OAuth metadata", async () => {
-			for (const path of ["/", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp"]) {
-				expect((await get(path, { AUTH_RL: denying })).status, path).toBe(200);
-			}
-		});
+	it("closed registration refuses a new sign-in by metadata URL without fetching it", async () => {
+		const spy = mockFetch(() => new Response("{}"));
+		const response = await authorizeWith(cimdUrl(), {});
+		expect(response.status).toBe(403);
+		expect(await response.text()).toContain("accepting new app connections");
+		expect(spy).not.toHaveBeenCalled();
 	});
 
-	it("issues a token that opens /mcp", async () => {
-		const { client_id, verifier, handle, cookies } = await startConsent();
-		const approved = await submit(handle, cookies, "correct horse battery staple");
-		expect(approved.status).toBe(302);
-		const location = new URL(approved.headers.get("Location")!);
-		expect(location.origin + location.pathname).toBe(REDIRECT);
-		expect(location.searchParams.get("state")).toBe("state-123");
-		const code = location.searchParams.get("code");
-		expect(code).toBeTruthy();
+	it("never fetches metadata from a host off the allowlist, open or closed", async () => {
+		const spy = mockFetch(() => new Response("{}"));
+		for (const id of [cimdUrl("evil.example"), cimdUrl("claude.ai.evil.example"), "https://claude.ai:8443/oauth/x.json"]) {
+			expect((await authorizeWith(id, OPEN)).status, id).toBe(400);
+		}
+		const tokenAttempt = await token({ grant_type: "authorization_code", code: "x", client_id: cimdUrl("evil.example"), code_verifier: "x", redirect_uri: CLAUDE_REDIRECT });
+		expect(tokenAttempt.status).toBe(401);
+		const basic = await viaWorker(
+			new Request(`${ORIGIN}/token`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					Authorization: `Basic ${btoa(`${encodeURIComponent(cimdUrl("evil.example"))}:x`)}`,
+					"CF-Connecting-IP": ip,
+				},
+				body: "grant_type=refresh_token&refresh_token=x",
+			}),
+		);
+		expect(basic.status).toBe(401);
+		expect(spy).not.toHaveBeenCalled();
+	});
 
-		const token = await SELF.fetch(`${ORIGIN}/token`, {
-			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
-			body: new URLSearchParams({
-				grant_type: "authorization_code",
-				code: code!,
-				redirect_uri: REDIRECT,
-				client_id,
-				code_verifier: verifier,
-				resource: `${ORIGIN}/mcp`,
-			}).toString(),
-		});
-		expect(token.status).toBe(200);
-		const { access_token } = (await token.json()) as Json;
-		expect(access_token).toBeTruthy();
+	it("with registration open, an allowlisted document is fetched and the consent page shows", async () => {
+		const url = cimdUrl();
+		const spy = mockFetch((u) => (u === url ? Response.json(cimdDoc(url)) : new Response("unexpected", { status: 599 })));
+		const response = await authorizeWith(url, OPEN);
+		const html = await response.text();
+		expect(response.status, html.slice(0, 300)).toBe(200);
+		expect(html).toContain("claude.ai");
+		expect(spy).toHaveBeenCalled();
+	});
 
-		const tools = await SELF.fetch(`${ORIGIN}/mcp`, {
-			method: "POST",
-			headers: {
-				Authorization: `Bearer ${access_token}`,
-				"Content-Type": "application/json",
-				Accept: "application/json, text/event-stream",
-				"MCP-Protocol-Version": "2025-11-25",
-				Host: new URL(ORIGIN).host,
-			},
-			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+	it("refuses a document over 5 KB (the library's limit)", async () => {
+		const url = cimdUrl();
+		mockFetch(() => Response.json(cimdDoc(url, CLAUDE_REDIRECT, { padding: "x".repeat(6 * 1024) })));
+		const response = await authorizeWith(url, OPEN);
+		expect(response.status).toBe(400);
+		expect(await response.text()).toContain("could not be verified");
+	});
+
+	it("refuses an http:// metadata URL outright (only https is a metadata URL)", async () => {
+		const spy = mockFetch(() => new Response("{}"));
+		const response = await authorizeWith("http://claude.ai/oauth/x.json", OPEN);
+		expect(response.status).toBeGreaterThanOrEqual(400);
+		expect(spy).not.toHaveBeenCalled();
+	});
+
+	it("gives up on a document that takes longer than 10 seconds (the library's limit)", { timeout: 20_000 }, async () => {
+		const url = cimdUrl();
+		mockFetch(
+			() =>
+				new Promise<Response>(() => {
+					// never answers
+				}),
+		);
+		// The library aborts via its own signal; the mock ignores it, so emulate a server that honours it.
+		fetchSpy!.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+			const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+			return new Promise<Response>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted"))));
 		});
-		expect(tools.status).toBe(200);
-		const text = await tools.text();
-		const payload = text.includes("data:")
-			? JSON.parse(text.split("\n").filter((l) => l.startsWith("data:")).pop()!.slice(5))
-			: JSON.parse(text);
-		expect(payload.result.tools.map((t: Json) => t.name)).toEqual([...TOOL_NAMES]);
+		const started = Date.now();
+		const response = await authorizeWith(url, OPEN);
+		const elapsed = Date.now() - started;
+		expect(response.status).toBe(400);
+		expect(elapsed).toBeGreaterThanOrEqual(9_500);
+		expect(elapsed).toBeLessThan(15_000);
+	});
+
+	it("an app connected by metadata URL keeps refreshing after registration closes", async () => {
+		const url = cimdUrl();
+		mockFetch((u) => (u === url ? Response.json(cimdDoc(url)) : new Response("unexpected", { status: 599 })));
+		const { tokens } = await signIn({ client_id: url, custom: OPEN });
+		// Now closed (unset): a new sign-in by the same URL is refused...
+		expect((await authorizeWith(url, {})).status).toBe(403);
+		// ...but the existing grant still refreshes.
+		const refreshed = await token({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: url });
+		expect(refreshed.status).toBe(200);
+	});
+});
+
+describe("rate limits (Durable Object counters)", () => {
+	const denying = {
+		idFromName: () => ({}),
+		get: () => ({ hit: async () => ({ ok: false, retryAfter: 42 }) }),
+	} as unknown as Env["AUTH_LIMITER"];
+	const broken = {
+		idFromName: () => {
+			throw new Error("binding down");
+		},
+	} as unknown as Env["AUTH_LIMITER"];
+
+	it("the 11th GET /authorize from one IP in a minute is refused", async () => {
+		await awayFromWindowEdge();
+		const statuses: number[] = [];
+		for (let i = 0; i < 11; i++) statuses.push((await SELF.fetch(`${ORIGIN}/authorize`, { redirect: "manual", headers: { "CF-Connecting-IP": ip } })).status);
+		expect(statuses.slice(0, 10).every((s) => s !== 429), statuses.join(",")).toBe(true);
+		expect(statuses[10], statuses.join(",")).toBe(429);
+	});
+
+	it("POST /authorize and /register share that budget", async () => {
+		await awayFromWindowEdge();
+		for (let i = 0; i < 10; i++) await SELF.fetch(`${ORIGIN}/register`, { method: "POST", headers: { "CF-Connecting-IP": ip }, body: "{}" });
+		const blocked = await SELF.fetch(`${ORIGIN}/authorize`, { method: "POST", headers: { "CF-Connecting-IP": ip }, body: "" });
+		expect(blocked.status).toBe(429);
+		expect(Number(blocked.headers.get("Retry-After"))).toBeGreaterThan(0);
+	});
+
+	it("the 31st POST /token from one IP in a minute is refused, with a JSON error", async () => {
+		await awayFromWindowEdge();
+		const statuses: number[] = [];
+		for (let i = 0; i < 31; i++) {
+			const r = await SELF.fetch(`${ORIGIN}/token`, {
+				method: "POST",
+				headers: { "Content-Type": "application/x-www-form-urlencoded", "CF-Connecting-IP": ip },
+				body: "grant_type=refresh_token&refresh_token=nope&client_id=nope",
+			});
+			statuses.push(r.status);
+			if (i === 30) {
+				expect(r.headers.get("Content-Type")).toContain("application/json");
+				expect(((await r.json()) as Json).error).toBe("temporarily_unavailable");
+			}
+		}
+		expect(statuses.slice(0, 30).every((s) => s !== 429), statuses.join(",")).toBe(true);
+		expect(statuses[30]).toBe(429);
+	});
+
+	it("the 11th /bridge upgrade from one IP in a minute is refused", async () => {
+		await awayFromWindowEdge();
+		const statuses: number[] = [];
+		for (let i = 0; i < 11; i++) {
+			const r = await SELF.fetch(`${ORIGIN}/bridge`, { headers: { Upgrade: "websocket", "CF-Connecting-IP": ip } });
+			statuses.push(r.status);
+			r.webSocket?.accept();
+			r.webSocket?.close();
+		}
+		expect(statuses.slice(0, 10).every((s) => s === 101), statuses.join(",")).toBe(true);
+		expect(statuses[10]).toBe(429);
+	});
+
+	it("caps sign-in traffic across all IPs too", async () => {
+		await awayFromWindowEdge();
+		const original = GLOBAL_AUTH.limit;
+		GLOBAL_AUTH.limit = 3;
+		GLOBAL_AUTH.bucket = `auth-all-test-${crypto.randomUUID()}`;
+		try {
+			const statuses: number[] = [];
+			for (let i = 0; i < 4; i++) statuses.push((await SELF.fetch(`${ORIGIN}/authorize`, { redirect: "manual", headers: { "CF-Connecting-IP": randomIp() } })).status);
+			expect(statuses.slice(0, 3).every((s) => s !== 429), statuses.join(",")).toBe(true);
+			expect(statuses[3]).toBe(429);
+		} finally {
+			GLOBAL_AUTH.limit = original;
+			GLOBAL_AUTH.bucket = "auth-all";
+		}
+		expect(GLOBAL_AUTH_LIMIT).toBe(60);
+	});
+
+	it("uses the limiter's Retry-After", async () => {
+		const response = await viaWorker(new Request(`${ORIGIN}/authorize`, { headers: { "CF-Connecting-IP": ip } }), { AUTH_LIMITER: denying });
+		expect(response.status).toBe(429);
+		expect(response.headers.get("Retry-After")).toBe("42");
+	});
+
+	it("fails closed when the limiter itself fails", async () => {
+		for (const [method, path] of [["GET", "/authorize"], ["POST", "/authorize"], ["POST", "/register"], ["POST", "/token"], ["GET", "/bridge"]]) {
+			const response = await viaWorker(new Request(`${ORIGIN}${path}`, { method, headers: { "CF-Connecting-IP": ip } }), { AUTH_LIMITER: broken });
+			expect(response.status, `${method} ${path}`).toBe(429);
+		}
+	});
+
+	it("does not meter the status page or the metadata", async () => {
+		for (const path of ["/", "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp"]) {
+			expect((await viaWorker(new Request(`${ORIGIN}${path}`), { AUTH_LIMITER: broken })).status, path).toBe(200);
+		}
 	});
 });

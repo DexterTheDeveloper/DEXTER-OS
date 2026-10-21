@@ -1,10 +1,14 @@
 /**
- * DEXTER MCP server (DEX-001).
- * Deploys as its own Worker from the `mcp/` folder of dexter-os.
- * D1 `dexter` and the OAUTH_KV namespace were created with wrangler on 2026-10-17
- * (account godfreyconnection@gmail.com); their IDs are pinned below so every
- * deploy binds the same resources. Secrets are set with `wrangler secret put`
- * or in the Cloudflare dashboard, never here.
+ * DEXTER MCP front door (DEX-001, relay build).
+ * A thin authenticated relay: OAuth + consent in front, a Durable Object (`Bridge`) behind it that
+ * holds the one outbound WebSocket the Mac DEXTER dials. No model, no memory, no database here.
+ *
+ * The OAUTH_KV namespace was created with wrangler on 2026-10-17 (account
+ * godfreyconnection@gmail.com); its ID is pinned so every deploy binds the same store.
+ * The old D1 `dexter` database is no longer bound; it can be deleted from the dashboard once he
+ * is satisfied nothing reads it. Secrets are set with `wrangler secret put`, never here.
+ * The custom domain mcp.iiiglobe.com stays attached in the dashboard; no route is declared here,
+ * so a deploy never touches DNS.
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -12,21 +16,24 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
-  "workers_dev": true,
+  // One public hostname only: mcp.iiiglobe.com. No workers.dev URL, no preview URLs.
+  "workers_dev": false,
+  "preview_urls": false,
   "keep_vars": true,
   "observability": { "enabled": true },
-  "triggers": { "crons": ["* * * * *"] },
-  "d1_databases": [
-    { "binding": "DB", "database_name": "dexter", "database_id": "f1326ef4-4199-49ba-a858-cc78834f8d1a" }
-  ],
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "078a71ca655f4762a732d6822c00de63" }],
-  // Per-IP cap on GET /authorize (the consent page), POST /authorize and POST /register: one budget
-  // for the three, checked before anything is written to KV.
-  // The KV lock-out (5 wrong passphrases per 15 minutes) stays as the second layer.
-  "ratelimits": [{ "name": "AUTH_RL", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }],
-  // ALLOW_CLIENT_REGISTRATION is deliberately not a var here: the operator sets it to "false" as a
-  // secret once every assistant is connected (registration is open only while it is unset or
-  // "true"), and a var of the same name would collide with it.
-  "vars": { "DEXTER_TZ": "America/New_York" },
+  "durable_objects": {
+    "bindings": [
+      // The Mac's one outbound socket and the request/reply correlation (src/bridge.ts).
+      { "name": "BRIDGE", "class_name": "Bridge" },
+      // Fixed-window counters for /authorize, /token, /register and /bridge (src/ratelimit.ts).
+      // Replaces the AUTH_RL Workers rate-limit binding, which did not enforce on the live Worker.
+      { "name": "AUTH_LIMITER", "class_name": "AuthLimiter" }
+    ]
+  },
+  // SQLite-backed classes: the only Durable Object storage available on the free plan.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Bridge", "AuthLimiter"] }],
+  // ALLOW_CLIENT_REGISTRATION is deliberately not a var: registration is CLOSED unless the operator
+  // sets it to "true" as a secret while connecting an app, then deletes it.
   "dev": { "port": 8788 }
 }
