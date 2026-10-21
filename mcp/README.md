@@ -1,63 +1,129 @@
-# DEXTER MCP server (DEX-001)
+# DEXTER MCP front door (DEX-001, relay build)
 
-DEXTER's memory and tools as one remote MCP server on Cloudflare Workers. Claude, ChatGPT and (later) Alexa+ and the DEXTER Core agent all connect here, so every assistant works from DEXTER's memory instead of its own.
+One MCP address, `https://mcp.iiiglobe.com/mcp`, for Claude, Claude Code and ChatGPT. Every answer
+comes from the **Mac DEXTER**. This Worker is a locked door and a relay. It has no model, memory,
+database or reminders of its own. When the Mac isn't connected, every tool answers "DEXTER is
+asleep". There is no cached or second-hand answer.
 
-## Set it up (about 5 minutes, all in the Cloudflare dashboard)
+```
+Claude / ChatGPT ──OAuth──▶ Worker /mcp ──RPC──▶ Bridge (Durable Object) ◀──WebSocket── Mac DEXTER
+                                                    (the Mac dials out; nothing on the Mac listens)
+```
 
-1. **Create the Worker from this repo.** Workers & Pages → **Create** → **Import a repository** → pick `dexter-os` → set **Root directory** to `mcp` → **Deploy**. The database (D1) and key-value store (KV) are created on the first deploy. Every push to `main` redeploys.
-2. **Add two secrets.** Open the new `dexter-mcp` Worker → **Settings** → **Variables and Secrets** → **Add**, type **Secret**:
-   - `ANTHROPIC_API_KEY`: a workspace-scoped key created for this Worker, not the Pages project's key, so either one can be revoked on its own
-   - `DEXTER_PASSPHRASE`: a passphrase of its own, four or more random words (12+ characters). Never the dexter-os Pages passphrase: the PWA keeps that one in plain text in the browser storage of every device that has opened the site
-3. **Check it.** Open `https://dexter-mcp.<your-subdomain>.workers.dev`. It should say **Online**. If it lists missing secrets, add those.
-4. **Connect Claude.** claude.ai → **Settings** → **Connectors** → **Add custom connector** → URL `https://dexter-mcp.<your-subdomain>.workers.dev/mcp` → **Connect** → enter the passphrase → **Allow**.
-5. **Turn on reminder pushes.** Ask Claude for "DEXTER status" once (that generates the private ntfy topic), then read the topic yourself, in your own Terminal and NOT inside a Claude Code session (session transcripts are stored, so the topic would end up in one), from `mcp/`: `npx wrangler d1 execute dexter --remote --command "SELECT key, value FROM config WHERE key LIKE '%ntfy%'"`. Subscribe to it in the ntfy app. The topic is never shown to an assistant: anyone who knows it can push to your phone.
-6. **Load STATE.md.** In Claude: "Save this as DEXTER's STATE.md" and paste or attach the file.
+**Status:** built and tested offline only (`npm test`). Not deployed from this branch. It has
+never talked to the real Mac bridge. The live Worker at mcp.iiiglobe.com is still the 10/17 build.
 
-ChatGPT works the same way: Settings → Apps → Advanced settings → turn on **Developer mode** → **Create app** → same URL (web only).
+## Tools (all read-only)
 
-## Tools
+| Tool | What it does | Claude | Claude Code | ChatGPT |
+|---|---|---|---|---|
+| `dexter_ask` | Ask DEXTER a question. It answers from its memory, rules and read-only tools (up to ~55 s) | yes | yes | yes (no calendar: the Mac switches it off for this label) |
+| `dexter_whats_live` | What DEXTER can do right now, plus capability totals | yes | yes | yes |
+| `dexter_queue` | Open proposals and recent background requests (id/kind/status) | yes | yes | yes |
+| `dexter_memory_search` | Search what DEXTER has learned | yes | yes | **not offered** |
 
-| Tool | What it does |
-|---|---|
-| `dexter_status` | Handoff note from STATE.md, reminders for the next 7 days, failed reminders, last 5 log entries |
-| `dexter_log` | Append to the log (note, proof, workout, music, content, admin, backlog) |
-| `dexter_remind` | Push reminder at an ISO 8601 time with offset (default timezone America/New_York) |
-| `dexter_cancel_reminder` | Cancel a pending reminder by id |
-| `dexter_memory_list` | List memory files (store `memory` or read-only `reference`) |
-| `dexter_memory_read` | Read one memory file; ends with its sha256 |
-| `dexter_memory_propose` | Save a note to `/inbox/` for review; never overwrites |
-| `dexter_state_write` | Replace `/state/STATE.md`; needs the sha256 from a fresh read |
+- Every tool is annotated `readOnlyHint: true`. None can write, save, approve or run anything.
+- A tool an app isn't offered is neither listed nor callable.
+- Which app a connection belongs to is decided at sign-in. It comes from the Client ID Metadata
+  Document host or the registered redirect URI, never from the name the app gives itself.
+- Apps DEXTER doesn't recognise are refused at the consent page. Local (loopback) apps that don't
+  identify as Claude get the restricted ChatGPT policy (Codex CLI, for example).
+- The Mac re-checks everything on its side. The Worker's policy is the first layer, not the only
+  one.
+
+## Set it up (his hands)
+
+All `wrangler` lines run in your own Terminal, from this `mcp/` folder, signed in to the Cloudflare
+account that owns `dexter-mcp`. Not inside a Claude Code session: transcripts are stored.
+
+1. **Generate the bridge secret on the Mac.** `dexter mcp secret --new` prints it once.
+2. **Set the two secrets** (each command prompts for the value; paste, Enter):
+   ```
+   npx wrangler secret put DEXTER_PASSPHRASE
+   npx wrangler secret put BRIDGE_SECRET
+   ```
+   `DEXTER_PASSPHRASE`: four or more random words, its own. Never reused from anywhere else.
+3. **Deploy:** `npx wrangler deploy`. This creates the Bridge and AuthLimiter Durable Objects
+   (migration `v1`) and drops the old D1 binding and cron. The custom domain stays as it is, and
+   `workers_dev` is off, so the workers.dev address stops answering.
+4. **Exempt the MCP paths from bot blocking**, on mcp.iiiglobe.com only. In Cloudflare: the
+   iiiglobe.com zone, then Security, then WAF, then Custom rules, then Create rule. Action **Skip**,
+   with "All Super Bot Fight Mode rules" and "Bot Fight Mode / AI bots" (whichever the zone has)
+   ticked. Expression:
+   ```
+   (http.host eq "mcp.iiiglobe.com" and (http.request.uri.path eq "/mcp" or starts_with(http.request.uri.path, "/.well-known/oauth-") or http.request.uri.path eq "/authorize" or http.request.uri.path eq "/token"))
+   ```
+   Not yet in that list, and worth deciding: `/register` (needed only while connecting an app by
+   dynamic registration) and `/bridge` (the Mac's own connection, which a bot challenge could
+   block).
+5. **Check it.** Open `https://mcp.iiiglobe.com`. It should say **Online**. If it lists missing
+   secrets, add those.
+6. **Start the Mac bridge** (Part A: `com.dexter.mcpbridge`).
+7. **Connect an app.** New connections are closed by default. Open them only while connecting:
+   ```
+   npx wrangler secret put ALLOW_CLIENT_REGISTRATION     # type: true
+   ```
+   - **Claude:** claude.ai, then Settings, then Connectors, then Add custom connector. URL
+     `https://mcp.iiiglobe.com/mcp`. Connect, enter the passphrase, Allow. Mobile uses the same
+     connector once it's added.
+   - **Claude Code:** `claude mcp add --transport http dexter https://mcp.iiiglobe.com/mcp`, then
+     `/mcp` in a session to sign in.
+   - **ChatGPT** (only if the plan allows custom MCP servers): Settings, then Apps, then Advanced,
+     then Developer mode, then Create app. Same URL, web only.
+
+   Then close new connections again:
+   ```
+   npx wrangler secret delete ALLOW_CLIENT_REGISTRATION
+   ```
+   Apps already connected keep working.
+
+To disconnect one app, remove the connector in that app. Its refresh token stops being used and
+dies after 30 idle days. Revocation is served at `/token` (RFC 7009) for apps that call it.
+
+**Emergency stop:** `npx wrangler secret delete BRIDGE_SECRET`. The bridge shuts at once: the
+Mac can't reconnect, and every tool answers that the bridge isn't set up. It needs no deploy.
+Stopping the Mac's `com.dexter.mcpbridge` job has the same effect from the other end.
 
 ## How it's built
 
 | Piece | Detail |
 |---|---|
-| MCP endpoint | `/mcp`, stateless, `createMcpHandler` from `agents/mcp/server` with `@modelcontextprotocol/server` v2. Serves 2026-07-28 clients and 2025-era clients (Alexa+) |
-| Sign-in | OAuth 2.1 via `@cloudflare/workers-oauth-provider` (dynamic registration and Client ID Metadata Documents). The consent page asks for `DEXTER_PASSPHRASE`, and only after the consent handle and its cookie check out. Per IP: at most 10 requests a minute in total across the consent page (`GET /authorize`), its submit (`POST /authorize`) and registration (Workers rate limit `AUTH_RL`, checked before anything is written) and 5 wrong passphrases per 15 minutes (KV counter; if KV is unreachable the page refuses rather than skipping the check). Both only slow guessing. The passphrase's strength is the real gate |
-| Memory | Two Claude Managed Agents memory stores, created on first use: **DEXTER Memory** (read, propose, STATE.md) and **DEXTER Reference** (read only). Every change is versioned |
-| Log and reminders | D1 database `dexter`; tables are created on first use (`schema.sql` mirrors them) |
-| Reminder delivery | Cron every minute, push via ntfy. Each reminder is claimed before sending so it can't go out twice; 3 failures marks it failed |
-| Model calls | None. Runs on Cloudflare's free tier plus the memory store API |
+| MCP endpoint | `/mcp`, stateless, `createMcpHandler` (agents 0.28) with `@modelcontextprotocol/server` 2.0. Serves 2026-07-28 clients and 2025-era clients (`initialize` handshake, no `Mcp-Method`/`Mcp-Name` needed) |
+| Bridge | Durable Object `Bridge`, one instance. Holds the Mac's socket with the hibernation API, challenge handshake, signed frames, nonce cache in DO storage, `ping`/`pong` auto-response, 55 s reply timeout. Wire format: [PROTOCOL.md](PROTOCOL.md) |
+| Sign-in | OAuth 2.1 via `@cloudflare/workers-oauth-provider` 1.2.3. PKCE S256 only. `iss` on every authorization response (RFC 9207). Every token is bound to exactly `https://mcp.iiiglobe.com/mcp` (RFC 8707). Access tokens last 1 hour. Refresh tokens rotate on every use and die after 30 idle days. `offline_access` is granted when an app asks for it. Revocation is at `/token` |
+| Consent | The passphrase page shows the app's name, where access goes (redirect host) and exactly what it can read. Five wrong passphrases from one IP lock it out for 15 minutes (KV counter, fails closed). Optional Cloudflare Access sign-in instead, below |
+| Redirect URIs | Exact string match against the registered list. The one exception, per RFC 8252 and needed by Claude Code: a loopback redirect (`http://localhost`/`127.0.0.1`) may use any port |
+| Client ID Metadata Documents | Fetched only over https, from exactly `claude.ai` or `chatgpt.com`, refused before any fetch otherwise. The library caps each fetch at 5 KB and 10 s and refuses non-public addresses (`global_fetch_strictly_public`). New sign-ins by URL follow `ALLOW_CLIENT_REGISTRATION`. Apps already connected that way keep refreshing |
+| Registration | Closed unless `ALLOW_CLIENT_REGISTRATION` is exactly `true` (any case). Unset, `false`, a typo or anything else keeps it closed and stops advertising it |
+| Rate limits | Durable Object counters (exact, single-threaded), checked before anything else. Sign-in pages and registration: 10 a minute per IP and 60 a minute in total. `/token`: 30 a minute per IP. `/bridge`: 10 a minute per IP. If the limiter can't be reached, the request is refused |
+| Hostnames | Only `https://mcp.iiiglobe.com` answers (anything else gets 421). `workers_dev: false`, `preview_urls: false` |
+| Storage | `OAUTH_KV` (grants, tokens, registrations, lock-out counters) and the two Durable Objects' own storage (nonces, rate counters). No D1 |
 
 ## Optional: Cloudflare Access instead of the passphrase
 
-Create an Access for SaaS (OIDC) app with redirect URL `https://dexter-mcp.<your-subdomain>.workers.dev/callback` and a policy for your email, then add secrets `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET`, `ACCESS_ISSUER` and `ALLOWED_EMAIL`. When those are set, the consent page hands off to Access sign-in instead of asking for the passphrase. Tokens issued earlier by the passphrase page carry no email, so they stop working the moment `ALLOWED_EMAIL` is set: connect each app again.
+Create an Access for SaaS (OIDC) app with redirect URL `https://mcp.iiiglobe.com/callback` and a
+policy for your email. Then add the secrets `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET`,
+`ACCESS_ISSUER` and `ALLOWED_EMAIL`. Once those are set, the consent page hands off to an Access
+sign-in instead of asking for the passphrase. Tokens issued earlier carry no email, so they stop
+working when `ALLOWED_EMAIL` is set: reconnect each app.
 
-## Other settings
+## Settings
 
-| Name | Purpose |
-|---|---|
-| `ALLOW_CLIENT_REGISTRATION` | Registration is open only while this is unset or `true` (any case). Set it to `false` (as a secret, so it survives deploys) once every assistant is connected: `/register` then answers 403 and the OAuth metadata stops advertising it. Any other value (`no`, `0`, a typo, even a stray space) closes it too, on purpose. Connected apps keep working; their registrations last 90 days and renew on use |
-| `NTFY_TOPIC` | Pin your own ntfy topic instead of the generated one |
-| `NTFY_SERVER`, `NTFY_TOKEN` | Self-hosted or authenticated ntfy |
-| `MEMORY_STORE_ID`, `REFERENCE_STORE_ID` | Pin specific memory stores |
-| `DEXTER_TZ` (var) | Timezone for display, default America/New_York |
+| Name | Kind | Purpose |
+|---|---|---|
+| `DEXTER_PASSPHRASE` | secret, required | The consent-page passphrase, 12+ characters |
+| `BRIDGE_SECRET` | secret, required | 32-byte base64 shared with the Mac bridge (`dexter mcp secret --new`) |
+| `ALLOW_CLIENT_REGISTRATION` | secret, normally unset | `true` only while connecting an app |
+| `ACCESS_*`, `ALLOWED_EMAIL` | secrets, optional | Cloudflare Access sign-in |
 
 ## Develop
 
 ```bash
 npm install          # .npmrc sets legacy-peer-deps for the agents package
-npm test             # 58 tests in the Workers runtime, including a full OAuth round trip
-npm run typecheck
-npx wrangler dev     # local server on :8788 (needs a .dev.vars with the secrets)
+npm test             # offline, in the Workers runtime: OAuth round trips, the bridge protocol, rate limits
+npm run typecheck    # wrangler needs Node 22+
 ```
+
+The Worker only answers on `https://mcp.iiiglobe.com`, so `wrangler dev` on localhost answers 421.
+Tests use that origin directly. `.dev.vars.example` lists the local variables. Never commit
+`.dev.vars`.
