@@ -51,11 +51,15 @@ account that owns `dexter-mcp`. Not inside a Claude Code session: transcripts ar
    with "All Super Bot Fight Mode rules" and "Bot Fight Mode / AI bots" (whichever the zone has)
    ticked. Expression:
    ```
-   (http.host eq "mcp.iiiglobe.com" and (http.request.uri.path eq "/mcp" or starts_with(http.request.uri.path, "/.well-known/oauth-") or http.request.uri.path eq "/authorize" or http.request.uri.path eq "/token"))
+   (http.host eq "mcp.iiiglobe.com" and (http.request.uri.path eq "/mcp" or starts_with(http.request.uri.path, "/.well-known/oauth-") or http.request.uri.path eq "/authorize" or http.request.uri.path eq "/token" or http.request.uri.path eq "/bridge"))
    ```
-   Not yet in that list, and worth deciding: `/register` (needed only while connecting an app by
-   dynamic registration) and `/bridge` (the Mac's own connection, which a bot challenge could
-   block).
+   `/bridge` is the Mac's own WebSocket. A bot challenge there would stop the Mac's Python client
+   from connecting, and every tool would answer "asleep".
+
+   `/register` is needed only while connecting an app by dynamic registration (DCR). When you
+   connect one that way, add `or http.request.uri.path eq "/register"` for the duration, or
+   accept that a bot challenge may interrupt it. Registration is closed the rest of the time
+   anyway.
 5. **Check it.** Open `https://mcp.iiiglobe.com`. It should say **Online**. If it lists missing
    secrets, add those.
 6. **Start the Mac bridge** (Part A: `com.dexter.mcpbridge`).
@@ -77,12 +81,20 @@ account that owns `dexter-mcp`. Not inside a Claude Code session: transcripts ar
    ```
    Apps already connected keep working.
 
-To disconnect one app, remove the connector in that app. Its refresh token stops being used and
-dies after 30 idle days. Revocation is served at `/token` (RFC 7009) for apps that call it.
+### Revoking one app
 
-**Emergency stop:** `npx wrangler secret delete BRIDGE_SECRET`. The bridge shuts at once: the
-Mac can't reconnect, and every tool answers that the bridge isn't set up. It needs no deploy.
-Stopping the Mac's `com.dexter.mcpbridge` job has the same effect from the other end.
+Per-app revocation is enforced on the Mac:
+```
+dexter mcp deny <app>      # claude, claude_code or chatgpt
+```
+The Worker labels every call with its app, and the Mac refuses calls from a denied app,
+whatever token that app still holds. Removing the connector in the app also helps: its refresh
+token stops being used and dies after 30 idle days. Revocation is served at `/token` (RFC 7009)
+for apps that call it.
+
+**Emergency stop, for all apps:** `npx wrangler secret delete BRIDGE_SECRET`. The bridge shuts
+at once: the Mac can't reconnect, and every tool answers that the bridge isn't set up. It needs
+no deploy. Stopping the Mac's `com.dexter.mcpbridge` job has the same effect from the other end.
 
 ## How it's built
 
