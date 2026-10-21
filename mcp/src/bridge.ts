@@ -42,6 +42,11 @@ import {
 
 export const BRIDGE_NAME = "dexter";
 
+/** The wait for a reply: a caller may shorten it (tests do), never lengthen it past 55 s. */
+export function replyTimeout(requested?: number): number {
+	return Math.min(Math.max(requested ?? REPLY_TIMEOUT_MS, 1), REPLY_TIMEOUT_MS);
+}
+
 /** Unauthenticated sockets allowed at once. A stranger can't use them to push the Mac off. */
 const MAX_PENDING_SOCKETS = 3;
 /** Requests in flight at once. */
@@ -320,7 +325,7 @@ export class Bridge extends DurableObject<Env> {
 		};
 		const envelope = await sealFrame(key, msg);
 		const bodySha256 = await sha256Hex(bodyText);
-		const timeout = Math.min(Math.max(options.timeoutMs ?? REPLY_TIMEOUT_MS, 1), REPLY_TIMEOUT_MS);
+		const timeout = replyTimeout(options.timeoutMs);
 
 		return new Promise<RelayResult>((resolve) => {
 			const timer = setTimeout(() => {

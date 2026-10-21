@@ -122,6 +122,7 @@ working when `ALLOWED_EMAIL` is set: reconnect each app.
 npm install          # .npmrc sets legacy-peer-deps for the agents package
 npm test             # offline, in the Workers runtime: OAuth round trips, the bridge protocol, rate limits
 npm run typecheck    # wrangler needs Node 22+
+python3 scripts/mutation-check.py   # ~25 min: disables each security check in turn; every one must be CAUGHT
 ```
 
 The Worker only answers on `https://mcp.iiiglobe.com`, so `wrangler dev` on localhost answers 421.

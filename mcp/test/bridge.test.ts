@@ -13,6 +13,7 @@ import {
 	sealFrame,
 	sha256Hex,
 } from "../src/protocol";
+import { replyTimeout } from "../src/bridge";
 import { ASLEEP_TEXT } from "../src/server";
 import {
 	bridgeStub,
@@ -206,13 +207,22 @@ describe("request/reply", () => {
 		expect(await ask()).toMatchObject({ status: "ok", text: "next one works" });
 	});
 
-	it("never waits longer than 55 seconds, whatever the caller asks for", async () => {
+	it("honours a shorter timeout", async () => {
 		const mac = await connectMac();
 		const started = Date.now();
 		const pending = bridgeStub().relay({ tool: "dexter_queue", args: {}, app: "claude", clientId: "c" }, { timeoutMs: 10 });
 		await readRequest(mac.sock);
 		expect(await pending).toEqual({ status: "timeout" });
 		expect(Date.now() - started).toBeLessThan(2000);
+	});
+
+	it("never waits longer than 55 seconds, whatever the caller asks for", () => {
+		expect(replyTimeout()).toBe(55_000);
+		expect(replyTimeout(120_000)).toBe(55_000);
+		expect(replyTimeout(Number.POSITIVE_INFINITY)).toBe(55_000);
+		expect(replyTimeout(200)).toBe(200);
+		expect(replyTimeout(0)).toBe(1);
+		expect(replyTimeout(-5)).toBe(1);
 	});
 });
 

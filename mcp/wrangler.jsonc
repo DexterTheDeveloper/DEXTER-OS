@@ -21,6 +21,10 @@
   "preview_urls": false,
   "keep_vars": true,
   "observability": { "enabled": true },
+  // Explicitly empty, not omitted: wrangler only replaces a Worker's cron schedules when `crons` is
+  // present, so leaving it out would keep the old build's every-minute reminder cron firing at a
+  // Worker that no longer has a scheduled() handler. [] clears it on deploy.
+  "triggers": { "crons": [] },
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "078a71ca655f4762a732d6822c00de63" }],
   "durable_objects": {
     "bindings": [
